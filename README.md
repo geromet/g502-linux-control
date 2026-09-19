@@ -91,6 +91,7 @@ g502ctl dpi up|down       one stage
 g502ctl dpi set 2400      any DPI the device accepts
 g502ctl check             read-only compatibility check + full device report
 g502ctl backup [FILE]     dump the current device configuration as TOML
+g502ctl restore FILE      write a backup back (diff + confirmation; --dry-run, --yes)
 ```
 
 `check` and `backup` never write to the mouse. Any command that writes DPI first
@@ -126,12 +127,30 @@ src/bin/g502ctl.rs  status / dpi / check / backup
 - **The daemon only ever writes DPI values.** It never touches button mappings or LEDs.
 - **Logging** goes to stderr (journald picks up priorities); no notifications.
 
+### Restore
+
+`restore` compares the file with the device and lists exactly what would change
+(profile enabled/disabled, report rate, every resolution slot's DPI and disabled flag,
+button mappings, LED mode/colour/brightness). Before writing it checks that the file is
+for the same device model and shape, and that every value is one the device says it
+supports (DPI list, report rates, LED modes, button action types). It asks for
+confirmation (`--yes` to skip; refuses without a terminal otherwise), saves the current
+state to `~/.local/state/g502-linux-control/backups/pre-restore-<unix-time>.toml` so the
+restore can itself be undone, commits once, and then re-reads the device to confirm it
+matches the file. Restoring also restores the DPI values, so a backup taken at a
+different DPI will put that DPI back.
+
+Not restored: which profile/resolution is currently active or default (ratbagd applies
+those immediately rather than staging them) and LED effect duration.
+
 ### ratbagd D-Bus notes
 
 - `Resolution` is typed `v` and arrives double-wrapped (`Value(U32(..))` inside the
   property variant), so zbus' typed `TryFrom` fails on read. Writing needs an explicit
   `Value::Value(Box::new(Value::U32(dpi)))`; a plain `u32` is rejected with
   `expected 'v', got 'u'`.
+- `Button.Mapping` is `(uv)` and takes a single variant layer (unlike `Resolution`).
+  ratbagd marks the profile dirty even when the same value is written back.
 - Property writes only stage (`Profile.IsDirty`); `Device.Commit()` returns `0` on
   success and takes ~270 ms on the G502 HERO.
 - Devices are found by `Device.Model` (`usb:046d:c08b:0`); the nickname `ratbagctl`
@@ -162,7 +181,8 @@ they consume something it re-emits; never two grabbers on the same node.
 - A commit takes roughly 270 ms on the tested mouse (measured via `g502ctl dpi set`),
   so the pointer speed changes that long after a press. Presses during a commit are
   coalesced into the next one, not lost.
-- No GUI yet; no button/LED writing yet; `[profiles.N].color` is only compared by `check`.
+- No GUI yet. Buttons and LEDs can only be written through `restore` for now (no `button set`/`led set`
+  commands yet); `[profiles.N].color` is only compared by `check`.
 - Verified by hand on the tested mouse (2026-09-19): single presses, boundaries, bursts
   (29 presses folded into one commit), unplug/replug reconnect, pointer speed, and no
   F13/F14 leaking to the desktop while the grab is held. Not automated: the real
@@ -171,6 +191,6 @@ they consume something it re-emits; never two grabbers on the same node.
 ## Development
 
 ```sh
-cargo test        # pure logic: stepping, boundaries, bursts, config
+cargo test        # pure logic: stepping, boundaries, bursts, config, restore planning
 cargo build
 ```

@@ -2,6 +2,7 @@ pub mod config;
 pub mod dpi;
 pub mod input;
 pub mod ratbag;
+pub mod restore;
 
 use std::{fmt::Display, sync::OnceLock};
 

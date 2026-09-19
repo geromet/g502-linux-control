@@ -7,12 +7,12 @@
 use crate::config::Config;
 use crate::dpi::DpiBackend;
 use anyhow::{Context, Result, bail, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{fs::File, path::PathBuf};
 use zbus::{
     blocking::{Connection, Proxy, proxy::Builder},
     proxy::CacheProperties,
-    zvariant::{OwnedObjectPath, OwnedValue, Value},
+    zvariant::{OwnedObjectPath, OwnedValue, StructureBuilder, Value},
 };
 
 const DEST: &str = "org.freedesktop.ratbag1";
@@ -106,6 +106,79 @@ impl Ratbag {
         Ok(())
     }
 
+    // ----------------------------------------------------------------- staging
+    // Everything below only stages; nothing reaches the hardware until `commit`.
+
+    fn stage(&self, path: &str, iface: &str, prop: &str, value: Value<'_>) -> Result<()> {
+        proxy(&self.conn, path, iface)?
+            .set_property(prop, value)
+            .with_context(|| format!("staging {iface}.{prop} on {path}"))
+    }
+
+    fn profile_path(&self, profile: u32) -> Result<OwnedObjectPath> {
+        let mut all = self.profile_paths()?;
+        ensure!((profile as usize) < all.len(), "device has no profile {profile}");
+        Ok(all.swap_remove(profile as usize))
+    }
+
+    fn child_path(&self, profile: u32, prop: &str, index: u32, what: &str) -> Result<OwnedObjectPath> {
+        let p = self.profile_path(profile)?;
+        let mut all: Vec<OwnedObjectPath> = self.get(p.as_str(), PROFILE, prop)?;
+        ensure!((index as usize) < all.len(), "profile {profile} has no {what} {index}");
+        Ok(all.swap_remove(index as usize))
+    }
+
+    pub fn stage_profile_disabled(&self, profile: u32, disabled: bool) -> Result<()> {
+        let p = self.profile_path(profile)?;
+        self.stage(p.as_str(), PROFILE, "Disabled", Value::Bool(disabled))
+    }
+
+    pub fn stage_report_rate(&self, profile: u32, hz: u32) -> Result<()> {
+        let p = self.profile_path(profile)?;
+        self.stage(p.as_str(), PROFILE, "ReportRate", Value::U32(hz))
+    }
+
+    pub fn stage_slot_dpi(&self, profile: u32, slot: u32, dpi: u32) -> Result<()> {
+        self.stage_dpi(&self.resolution_path(profile, slot)?, dpi)
+    }
+
+    pub fn stage_slot_disabled(&self, profile: u32, slot: u32, disabled: bool) -> Result<()> {
+        let r = self.resolution_path(profile, slot)?;
+        self.stage(r.as_str(), RESOLUTION, "IsDisabled", Value::Bool(disabled))
+    }
+
+    /// `Button.Mapping` is `(uv)`: unlike `Resolution` (typed `v`) it takes a
+    /// single variant layer around the value.
+    pub fn stage_button(&self, profile: u32, button: u32, kind: u32, value: Option<&RawValue>) -> Result<()> {
+        let inner = match value {
+            Some(RawValue::Number(n)) => Value::U32(*n),
+            Some(RawValue::MacroEvents(ev)) => {
+                Value::from(ev.iter().map(|[a, b]| (*a, *b)).collect::<Vec<(u32, u32)>>())
+            }
+            None => Value::U32(0),
+        };
+        let mapping = StructureBuilder::new()
+            .append_field(Value::U32(kind))
+            .append_field(Value::Value(Box::new(inner)))
+            .build()?;
+        let b = self.child_path(profile, "Buttons", button, "button")?;
+        self.stage(b.as_str(), BUTTON, "Mapping", Value::Structure(mapping))
+    }
+
+    pub fn stage_led(&self, profile: u32, led: u32, mode: Option<u32>, color: Option<(u8, u8, u8)>, brightness: Option<u32>) -> Result<()> {
+        let l = self.child_path(profile, "Leds", led, "LED")?;
+        if let Some(m) = mode {
+            self.stage(l.as_str(), LED, "Mode", Value::U32(m))?;
+        }
+        if let Some((r, g, b)) = color {
+            self.stage(l.as_str(), LED, "Color", Value::from((u32::from(r), u32::from(g), u32::from(b))))?;
+        }
+        if let Some(b) = brightness {
+            self.stage(l.as_str(), LED, "Brightness", Value::U32(b))?;
+        }
+        Ok(())
+    }
+
     // ---------------------------------------------------------------- snapshot
 
     pub fn snapshot(&self) -> Result<Snapshot> {
@@ -193,14 +266,14 @@ fn unwrap<'a>(mut v: &'a Value<'a>) -> &'a Value<'a> {
 
 // ------------------------------------------------------------------- snapshot
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub name: String,
     pub model: String,
     pub profiles: Vec<ProfileInfo>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfileInfo {
     pub index: u32,
     pub disabled: bool,
@@ -213,7 +286,7 @@ pub struct ProfileInfo {
     pub leds: Vec<LedInfo>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ButtonInfo {
     pub index: u32,
     pub action_types: Vec<u32>,
@@ -223,18 +296,18 @@ pub struct ButtonInfo {
     pub raw_type: u32,
     /// Button number / special id / key code, or macro events as
     /// [event_type, key] pairs (1 = press, 2 = release).
-    pub raw_value: RawValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_value: Option<RawValue>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum RawValue {
-    None,
     Number(u32),
     MacroEvents(Vec<[u32; 2]>),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolutionInfo {
     pub index: u32,
     pub dpi: Option<u32>,
@@ -245,7 +318,7 @@ pub struct ResolutionInfo {
     pub supported_dpi: Vec<u32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LedInfo {
     pub index: u32,
     pub mode: u32,
@@ -255,8 +328,8 @@ pub struct LedInfo {
     pub color_depth: u32,
 }
 
-fn raw_value(v: &OwnedValue) -> RawValue {
-    match unwrap(v) {
+fn raw_value(v: &OwnedValue) -> Option<RawValue> {
+    Some(match unwrap(v) {
         Value::U32(n) => RawValue::Number(*n),
         Value::Array(items) => {
             // a(uu): (event type, key) pairs
@@ -267,24 +340,20 @@ fn raw_value(v: &OwnedValue) -> RawValue {
                 },
                 _ => None,
             };
-            match items.iter().map(pair).collect::<Option<Vec<_>>>() {
-                Some(events) => RawValue::MacroEvents(events),
-                None => RawValue::None,
-            }
+            RawValue::MacroEvents(items.iter().map(pair).collect::<Option<Vec<_>>>()?)
         }
-        _ => RawValue::None,
-    }
+        _ => return None,
+    })
 }
 
 /// libratbag's button action types and special-action ids.
 pub fn describe_mapping(kind: u32, v: &OwnedValue) -> String {
-    let raw = raw_value(v);
-    match (kind, raw) {
+    match (kind, raw_value(v)) {
         (0, _) => "none".into(),
-        (1, RawValue::Number(n)) => format!("mouse button {n}"),
-        (2, RawValue::Number(n)) => format!("special {}", special_name(n)),
-        (3, RawValue::Number(n)) => format!("key {}", key_name(n)),
-        (4, RawValue::MacroEvents(ev)) => {
+        (1, Some(RawValue::Number(n))) => format!("mouse button {n}"),
+        (2, Some(RawValue::Number(n))) => format!("special {}", special_name(n)),
+        (3, Some(RawValue::Number(n))) => format!("key {}", key_name(n)),
+        (4, Some(RawValue::MacroEvents(ev))) => {
             let steps: Vec<String> = ev
                 .iter()
                 .map(|[t, k]| match t {

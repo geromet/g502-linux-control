@@ -7,8 +7,14 @@ use g502_linux_control::{
     dpi::{DpiBackend, Step, apply_batch},
     input,
     ratbag::{Controller, Ratbag, RawValue, Snapshot, lock_writes},
+    restore as plan_mod,
 };
-use std::process::exit;
+use std::{
+    io::{IsTerminal, Write},
+    path::PathBuf,
+    process::exit,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 const USAGE: &str = "\
 usage: g502ctl <command>
@@ -19,6 +25,10 @@ usage: g502ctl <command>
   check             read-only compatibility check and device report
   backup [FILE]     write the full current device configuration as TOML
                     (stdout if no FILE)
+  restore FILE [--dry-run] [--yes]
+                    write a backup back to the device. Shows a diff first and
+                    asks to confirm (--yes skips the prompt, --dry-run only
+                    shows the diff). Saves the pre-restore state as a backup.
 
 Config: $G502_CONFIG or ~/.config/g502-linux-control/config.toml
 ";
@@ -39,6 +49,9 @@ fn main() {
         ["check"] => check(),
         ["backup"] => backup(None),
         ["backup", file] => backup(Some(file)),
+        ["restore", file, ref flags @ ..] if flags.iter().all(|f| ["--dry-run", "--yes"].contains(f)) => {
+            restore(file, flags.contains(&"--dry-run"), flags.contains(&"--yes"))
+        }
         _ => {
             eprint!("{USAGE}");
             exit(2);
@@ -141,6 +154,75 @@ fn backup(file: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn state_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from(".local/state"));
+    base.join("g502-linux-control/backups")
+}
+
+fn restore(file: &str, dry_run: bool, yes: bool) -> Result<()> {
+    let cfg = load_config()?;
+    let text = std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("reading {file}: {e}"))?;
+    let target: Snapshot = toml::from_str(&text).map_err(|e| anyhow::anyhow!("{file} is not a g502ctl backup: {e}"))?;
+    let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
+    let plan = plan_mod::plan(&rb.snapshot()?, &target)?;
+
+    if plan.is_empty() {
+        println!("device already matches {file}; nothing to do");
+        return Ok(());
+    }
+    println!("{} change(s) from {file}:", plan.len());
+    for p in &plan {
+        println!("  {}", p.summary);
+    }
+    if dry_run {
+        println!("dry run: nothing was written");
+        return Ok(());
+    }
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            bail!("not a terminal; pass --yes to write without asking");
+        }
+        print!("write these to the device? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("aborted; nothing was written");
+            return Ok(());
+        }
+    }
+
+    // Hold the lock so the daemon's DPI writes cannot interleave, and re-plan
+    // under it in case the device changed while we were asking.
+    let _guard = lock_writes()?;
+    let before = rb.snapshot()?;
+    let plan = plan_mod::plan(&before, &target)?;
+
+    let dir = state_dir();
+    std::fs::create_dir_all(&dir)?;
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let saved = dir.join(format!("pre-restore-{secs}.toml"));
+    std::fs::write(&saved, toml::to_string_pretty(&before)?)?;
+    println!("saved current state to {}", saved.display());
+
+    plan_mod::stage(&rb, &plan)?;
+    rb.commit()?;
+
+    let left = plan_mod::plan(&rb.snapshot()?, &target)?;
+    if left.is_empty() {
+        println!("restored {} change(s); device now matches {file}", plan.len());
+        Ok(())
+    } else {
+        for p in &left {
+            eprintln!("  still differs: {}", p.summary);
+        }
+        bail!("{} difference(s) remain after the write; undo with: g502ctl restore {}", left.len(), saved.display())
+    }
+}
+
 // ---------------------------------------------------------------------- check
 
 struct Report {
@@ -211,7 +293,7 @@ fn check() -> Result<()> {
 
     // Which buttons feed the daemon? KEY_F13 (183) = down, KEY_F14 (184) = up.
     for (code, name) in [(183, "F13 (DPI down)"), (184, "F14 (DPI up)")] {
-        let want = RawValue::MacroEvents(vec![[1, code], [2, code]]);
+        let want = Some(RawValue::MacroEvents(vec![[1, code], [2, code]]));
         let found: Vec<String> = snap
             .profiles
             .iter()
