@@ -17,7 +17,7 @@
 use g502_linux_control::{
     apply::{overlay, with_button, with_led, with_profile_disabled, with_report_rate, with_slot},
     config::{Config, parse_color},
-    ratbag::{LED_MODES, ProfileInfo, Ratbag, RawValue, Snapshot, led_mode_name, parse_led_mode, special_names},
+    ratbag::{LED_MODES, ProfileInfo, Ratbag, RawValue, Snapshot, button_label, led_mode_name, parse_led_mode, special_names},
     restore::{plan, write},
 };
 use iced::{
@@ -585,7 +585,13 @@ impl App {
         };
 
         panel(
-            &format!("Edit {}", edit.title()),
+            &match edit {
+                Edit::Button(e) => match button_label(&d.snap.model, e.button) {
+                    Some(l) => format!("Edit profile {}: {l} (button {})", e.profile, e.button),
+                    None => format!("Edit {}", edit.title()),
+                },
+                _ => format!("Edit {}", edit.title()),
+            },
             column![
                 controls,
                 lines,
@@ -628,7 +634,7 @@ impl App {
 
         // Buttons
         let mut buttons = column![row![
-            text("Button").width(90).style(muted),
+            text("Button").width(200).style(muted),
             text("Action").width(Length::Fill).style(muted),
             text("Where it runs").width(330).style(muted),
             Space::new().width(70),
@@ -646,7 +652,11 @@ impl App {
                 .style(button::secondary);
             buttons = buttons.push(
                 row![
-                    text(format!("Button {}", b.index)).width(90),
+                    column![
+                        text(button_label(&d.snap.model, b.index).map_or(format!("Button {}", b.index), str::to_string)),
+                        text(format!("button {}", b.index)).size(11).style(muted),
+                    ]
+                    .width(200),
                     text(b.action.clone()).width(Length::Fill),
                     container(where_it_runs).width(330),
                     container(edit).width(70),

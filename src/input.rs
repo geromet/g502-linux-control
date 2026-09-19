@@ -1,7 +1,7 @@
 //! The G502's keyboard-like evdev endpoint: find it, grab it, turn F13/F14
 //! into DPI steps.
 //!
-//! The profile-1 side buttons send KEY_F13 / KEY_F14 as macros (see README for
+//! The profile-1 DPI buttons (button 6 = down, 7 = up) send KEY_F13 / KEY_F14 as macros (see README for
 //! why). We grab the endpoint exclusively so those keys never reach the
 //! desktop. Only one process may do this per node.
 

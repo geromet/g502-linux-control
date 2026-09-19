@@ -21,7 +21,7 @@ untested; `g502ctl check` warns for anything that is not `046d:c08b`.
 ## The problem, and why this exists
 
 The G502 has five onboard profiles. I use two: profile 0 (blue) with normal buttons,
-and profile 1 (red) where the two side buttons become DPI down/up. I want DPI to
+and profile 1 (red) where the two DPI buttons step the DPI. I want DPI to
 survive switching profiles.
 
 The obvious design — map those buttons to `resolution-up`/`resolution-down` and let
@@ -100,8 +100,7 @@ F13/F14 buttons `g502d` depends on.
 The shared DPI slot and daemon-synced profiles are deliberately not editable there (g502d
 owns them). Not in the GUI: the DPI stages in the config, and restore/apply (use `g502ctl`),
 and an "active profile" indicator (ratbagd's value for it is unreliable on this mouse,
-see below). Button labels are `Button N` because the mapping from index to physical
-button has not been verified on the hardware (`g502ctl identify` is for finding out). The GUI is behind a cargo feature so a plain
+see below). Buttons carry their physical names ("DPI down button", "Wheel tilt left", ...), shown by the GUI, `g502ctl check`/`identify` and as comments in exported configs; they exist only for the G502 HERO and were checked on the hardware with `g502ctl identify`. The GUI is behind a cargo feature so a plain
 `cargo install --path .` (daemon and CLI) stays small.
 
 A launcher entry is in [`packaging/g502-gui.desktop`](packaging/g502-gui.desktop)

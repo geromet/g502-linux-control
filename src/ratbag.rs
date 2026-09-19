@@ -467,6 +467,31 @@ fn parseable_key_name(code: u32) -> Option<String> {
     (name.starts_with("KEY_") && key_code(&name).ok() == Some(code)).then_some(name)
 }
 
+/// Physical name of a button index on the Logitech G502 HERO (`usb:046d:c08b`),
+/// `None` for any other device. Names follow the owner's wording and were checked
+/// on the hardware by pressing each button with `g502ctl identify` (2026-09-19):
+/// indices 6 and 7 are the DPI buttons, 9 and 10 the wheel tilts; 5 (sniper) and 8
+/// (profile) send no input event, so they are identified by their default function.
+pub fn button_label(model: &str, index: u32) -> Option<&'static str> {
+    if !model.to_lowercase().starts_with("usb:046d:c08b:") {
+        return None;
+    }
+    Some(match index {
+        0 => "Left mouse button",
+        1 => "Right mouse button",
+        2 => "Wheel click",
+        3 => "Side button 2",
+        4 => "Side button 1",
+        5 => "Sniper button",
+        6 => "DPI down button",
+        7 => "DPI up button",
+        8 => "Profile button",
+        9 => "Wheel tilt right",
+        10 => "Wheel tilt left",
+        _ => return None,
+    })
+}
+
 /// libratbag `Led.Mode` values (confirmed against ratbagctl's own enum).
 pub const LED_MODES: [&str; 4] = ["off", "on", "cycle", "breathing"];
 
@@ -590,6 +615,15 @@ mod tests {
         assert!(parse_action(&["key", "KEY_NOPE_NOT_REAL"]).is_err());
         assert!(parse_action(&["macro"]).is_err());
         assert!(parse_action(&["none", "extra"]).is_err());
+    }
+
+    #[test]
+    fn button_labels_only_for_the_g502_hero() {
+        assert_eq!(button_label("usb:046d:c08b:0", 6), Some("DPI down button"));
+        assert_eq!(button_label("usb:046D:C08B:1", 10), Some("Wheel tilt left"));
+        assert_eq!(button_label("usb:046d:c08b:0", 11), None);
+        assert_eq!(button_label("usb:046d:c539:0", 0), None);
+        assert!((0..=10).all(|i| button_label("usb:046d:c08b:0", i).is_some()));
     }
 
     #[test]

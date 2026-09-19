@@ -3,7 +3,7 @@
 //! a config describing the device as it is. Both are pure.
 
 use crate::config::{Config, parse_color};
-use crate::ratbag::{Snapshot, action_string, describe, led_mode_name, parse_action, parse_led_mode};
+use crate::ratbag::{Snapshot, action_string, button_label, describe, led_mode_name, parse_action, parse_led_mode};
 use crate::restore::check_can_disable;
 use anyhow::{Context, Result, bail};
 use std::fmt::Write;
@@ -181,6 +181,9 @@ pub fn export(snap: &Snapshot, cfg: &Config) -> Result<String> {
             writeln!(w, "color = \"{}\"\nbrightness = {}\n", l.color, l.brightness)?;
         }
         for b in &p.buttons {
+            if let Some(label) = button_label(&snap.model, b.index) {
+                writeln!(w, "# {label}")?;
+            }
             match action_string(b.raw_type, &b.raw_value) {
                 Some(a) => writeln!(w, "[profiles.{i}.buttons.{}]\nonboard = \"{a}\"\n", b.index)?,
                 None => writeln!(w, "# profiles.{i}.buttons.{}: {} (cannot be written in a config)\n", b.index, b.action)?,
@@ -267,6 +270,7 @@ mod tests {
         assert!(!text.contains("[profiles.1.resolutions.1]"));
         assert!(text.contains("onboard = \"special resolution-alternate\""));
         assert!(text.contains("onboard = \"macro KEY_F13\""));
+        assert!(text.contains("# Left mouse button\n[profiles.0.buttons.0]"), "labels are exported as comments");
         assert!(text.contains("# profiles.0.buttons.5: macro ["), "multi-event macro becomes a comment");
         assert!(text.contains("[profiles.2]\nenabled = false"));
         assert!(!text.contains("[profiles.2.buttons"), "disabled profiles only record that they are disabled");

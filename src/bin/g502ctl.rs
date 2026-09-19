@@ -6,7 +6,7 @@ use g502_linux_control::{
     config::Config,
     dpi::{DpiBackend, Step, apply_batch},
     input,
-    ratbag::{Controller, Ratbag, RawValue, Snapshot, describe, lock_writes, parse_action, parse_led_mode},
+    ratbag::{Controller, Ratbag, RawValue, Snapshot, button_label, describe, lock_writes, parse_action, parse_led_mode},
     apply as apply_mod,
     restore as plan_mod,
 };
@@ -357,7 +357,8 @@ fn buttons_for_code(snap: &Snapshot, code: u16) -> Vec<String> {
                 _ => false,
             };
             if hit {
-                out.push(format!("profile {} button {} ({})", p.index, b.index, b.action));
+                let label = button_label(&snap.model, b.index).map_or(String::new(), |l| format!("{l}, "));
+                out.push(format!("profile {} button {} ({label}{})", p.index, b.index, b.action));
             }
         }
     }
@@ -550,7 +551,8 @@ fn print_report(snap: &Snapshot) {
             println!("  resolution {}: {} DPI [{flags}] (accepts {range}, {} values)", res.index, res.dpi.map_or("?".into(), |d| d.to_string()), res.supported_dpi.len());
         }
         for b in &p.buttons {
-            println!("  button {:>2}: {}", b.index, b.action);
+            let label = button_label(&snap.model, b.index).map_or(String::new(), |l| format!(" ({l})"));
+            println!("  button {:>2}{label}: {}", b.index, b.action);
         }
         for l in &p.leds {
             println!("  led {}: mode {} (modes {:?}), color {}, brightness {}, color depth {}", l.index, l.mode, l.modes, l.color, l.brightness, l.color_depth);
