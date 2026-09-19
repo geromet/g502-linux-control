@@ -1,5 +1,5 @@
 # The layout recorded in baseline/README.md, as a config.
-# Profile 0 (blue): normal buttons. Profile 1 (red): side buttons send F13/F14 for g502d.
+# Profile 0 (blue): normal buttons. Profile 1 (red): the DPI buttons (6 and 7) send F13/F14 for g502d.
 # Profiles 2-4 are disabled. Nothing here touches DPI: that is [dpi] + g502d.
 
 [device]
