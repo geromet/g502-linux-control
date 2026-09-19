@@ -8,8 +8,12 @@
 //! immediate actions in ratbagd, not staged properties), and LED effect duration.
 
 use crate::config::parse_color;
-use crate::ratbag::{Ratbag, RawValue, Snapshot};
+use crate::ratbag::{Ratbag, RawValue, Snapshot, lock_writes};
 use anyhow::{Result, bail, ensure};
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
@@ -151,6 +155,59 @@ pub fn check_can_disable(snap: &Snapshot, dpi_profiles: &[u32], profile: u32) ->
     let enabled = snap.profiles.iter().filter(|q| !q.disabled).count();
     ensure!(p.disabled || enabled > 1, "refusing to disable the only enabled profile");
     Ok(())
+}
+
+/// Where pre-write backups go: `$XDG_STATE_HOME/g502-linux-control/backups`.
+pub fn backup_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from(".local/state"));
+    base.join("g502-linux-control/backups")
+}
+
+#[derive(Debug)]
+pub struct Committed {
+    pub written: usize,
+    /// The device state from just before the write (`g502ctl restore FILE` undoes it).
+    /// `None` if nothing needed writing.
+    pub backup: Option<PathBuf>,
+}
+
+/// The one write path for restore / apply / button set / led set / profile and
+/// the GUI: take the write lock, plan `target` against the device as it is now,
+/// save a backup, stage, commit once, then re-read and verify. Callers show the
+/// plan and ask for confirmation *before* calling this.
+pub fn write(rb: &Ratbag, target: &Snapshot) -> Result<Committed> {
+    // Held so the daemon's DPI writes cannot interleave; planning happens under
+    // it in case the device changed while the user was deciding.
+    let _guard = lock_writes()?;
+    let before = rb.snapshot()?;
+    let plan = plan(&before, target)?;
+    if plan.is_empty() {
+        return Ok(Committed { written: 0, backup: None });
+    }
+
+    let dir = backup_dir();
+    std::fs::create_dir_all(&dir)?;
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let saved = dir.join(format!("pre-restore-{secs}.toml"));
+    std::fs::write(&saved, toml::to_string_pretty(&before)?)?;
+
+    stage(rb, &plan)?;
+    rb.commit()?;
+
+    let left = self::plan(&rb.snapshot()?, target)?;
+    if !left.is_empty() {
+        let lines: Vec<_> = left.iter().map(|p| p.summary.as_str()).collect();
+        bail!(
+            "{} difference(s) remain after the write ({}); undo with: g502ctl restore {}",
+            left.len(),
+            lines.join("; "),
+            saved.display()
+        );
+    }
+    Ok(Committed { written: plan.len(), backup: Some(saved) })
 }
 
 /// Stage every planned change. Does not commit. Enabling a profile is staged

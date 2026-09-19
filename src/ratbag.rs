@@ -394,6 +394,11 @@ const SPECIALS: [&str; 19] = [
     "profile-cycle-down", "profile-up", "profile-down", "second-mode", "battery-level",
 ];
 
+/// Every special action name (excluding "unknown"), in libratbag id order.
+pub fn special_names() -> &'static [&'static str] {
+    &SPECIALS[1..]
+}
+
 fn special_name(id: u32) -> String {
     match id.checked_sub(1 << 30).and_then(|i| SPECIALS.get(i as usize)) {
         Some(n) => (*n).into(),

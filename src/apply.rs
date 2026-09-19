@@ -69,6 +69,22 @@ pub fn overlay(current: &Snapshot, cfg: &Config) -> Result<Snapshot> {
     Ok(t)
 }
 
+/// `current` with one button set to `action` (the `button set` grammar, e.g.
+/// `["key", "KEY_A"]`). Feed the result to `restore::plan`.
+pub fn with_button(current: &Snapshot, profile: u32, button: u32, action: &[&str]) -> Result<Snapshot> {
+    let (kind, value) = parse_action(action)?;
+    let mut t = current.clone();
+    let btn = t
+        .profiles
+        .get_mut(profile as usize)
+        .and_then(|p| p.buttons.get_mut(button as usize))
+        .with_context(|| format!("device has no profile {profile} button {button}"))?;
+    btn.action = describe(kind, &value);
+    btn.raw_type = kind;
+    btn.raw_value = value;
+    Ok(t)
+}
+
 /// A complete config for the device as it is now. Applying it again is an empty
 /// diff. The daemon-managed shared DPI slot is left out (that is `[dpi]`'s job),
 /// and disabled profiles only record that they are disabled. Things that have no
@@ -199,6 +215,19 @@ mod tests {
         assert_eq!(lines.len(), 3, "{lines:?}"); // 2 LEDs + 1 button, nothing else
         assert!(lines.iter().all(|l| l.starts_with("profile 1 ")));
         assert!(plan(&dev, &overlay(&dev, &cfg("")).unwrap()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn with_button_changes_only_that_button() {
+        let dev = device();
+        let t = with_button(&dev, 1, 3, &["special", "wheel-left"]).unwrap();
+        let p = plan(&dev, &t).unwrap();
+        assert_eq!(p.len(), 1);
+        assert!(p[0].summary.contains("profile 1 button 3: key KEY_A -> special wheel-left"), "{}", p[0].summary);
+        assert!(plan(&dev, &with_button(&dev, 1, 3, &["key", "a"]).unwrap()).unwrap().is_empty());
+        assert!(with_button(&dev, 1, 99, &["none"]).is_err());
+        assert!(with_button(&dev, 9, 0, &["none"]).is_err());
+        assert!(with_button(&dev, 0, 0, &["special", "nope"]).is_err());
     }
 
     #[test]

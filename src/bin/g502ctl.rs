@@ -12,9 +12,7 @@ use g502_linux_control::{
 };
 use std::{
     io::{IsTerminal, Write},
-    path::PathBuf,
     process::exit,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 const USAGE: &str = "\
@@ -184,14 +182,6 @@ fn backup(file: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn state_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"));
-    base.join("g502-linux-control/backups")
-}
-
 #[derive(Clone, Copy)]
 struct Mode {
     dry_run: bool,
@@ -236,32 +226,12 @@ fn write_snapshot(rb: &Ratbag, target: &Snapshot, label: &str, mode: Mode) -> Re
         }
     }
 
-    // Hold the lock so the daemon's DPI writes cannot interleave, and re-plan
-    // under it in case the device changed while we were asking.
-    let _guard = lock_writes()?;
-    let before = rb.snapshot()?;
-    let plan = plan_mod::plan(&before, target)?;
-
-    let dir = state_dir();
-    std::fs::create_dir_all(&dir)?;
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let saved = dir.join(format!("pre-restore-{secs}.toml"));
-    std::fs::write(&saved, toml::to_string_pretty(&before)?)?;
-    println!("saved current state to {}", saved.display());
-
-    plan_mod::stage(rb, &plan)?;
-    rb.commit()?;
-
-    let left = plan_mod::plan(&rb.snapshot()?, target)?;
-    if left.is_empty() {
-        println!("done: {} change(s) written and verified", plan.len());
-        Ok(())
-    } else {
-        for p in &left {
-            eprintln!("  still differs: {}", p.summary);
-        }
-        bail!("{} difference(s) remain after the write; undo with: g502ctl restore {}", left.len(), saved.display())
+    let done = plan_mod::write(rb, target)?;
+    if let Some(saved) = &done.backup {
+        println!("saved previous state to {}", saved.display());
     }
+    println!("done: {} change(s) written and verified", done.written);
+    Ok(())
 }
 
 fn apply(mode: Mode) -> Result<()> {
