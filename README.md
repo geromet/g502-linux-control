@@ -93,12 +93,14 @@ g502ctl check             read-only compatibility check + full device report
 g502ctl backup [FILE]     dump the current device configuration as TOML
 g502ctl restore FILE      write a backup back
 g502ctl button set P B ACTION   ACTION: none | button N | special NAME | key KEY_X | macro KEY_X
+g502ctl apply             write the config file's [profiles.*] settings to the device
+g502ctl config export [FILE]   print a config describing the device as it is now
 g502ctl profile enable|disable P
 g502ctl profile rate P 125|250|500|1000
 g502ctl led set P L [--mode off|on|cycle|breathing] [--color RRGGBB] [--brightness 0-255]
 ```
 
-`restore`, `button set`, `led set` and `profile` share one write path: show a diff, ask (or `--yes`;
+`restore`, `apply`, `button set`, `led set` and `profile` share one write path: show a diff, ask (or `--yes`;
 `--dry-run` only shows the diff), save the previous state as a backup, commit once, then
 re-read the device and fail loudly if it does not match. The flags are rejected on every
 other command, so `g502ctl dpi up --yes` cannot do anything unexpected. Special action names:
@@ -141,6 +143,28 @@ src/bin/g502ctl.rs  status / dpi / check / backup
   daemon and `g502ctl` from interleaving read-modify-write cycles.
 - **The daemon only ever writes DPI values.** It never touches button mappings or LEDs.
 - **Logging** goes to stderr (journald picks up priorities); no notifications.
+
+### Config-driven setup (`apply`)
+
+The config can describe the device programming, not just DPI: per profile `enabled`,
+`report_rate`, a `color` shorthand, per-LED `mode`/`color`/`brightness`, `buttons.N.onboard`
+actions and non-shared `resolutions.N`. `g502ctl apply` overlays exactly what the file names
+onto the device's current state (everything else is left alone), then goes through the usual
+diff, confirm, backup, commit, verify path. `g502ctl config export` writes a complete config
+for the current device, and applying that is an empty diff.
+[`packaging/config.baseline.toml`](packaging/config.baseline.toml) is the layout from
+[`baseline/`](baseline/README.md); [`packaging/config.example.toml`](packaging/config.example.toml)
+documents every key.
+
+- Button actions are `onboard = "..."` strings using the same words as `button set`. The key is
+  called `onboard` because actions stored in the mouse are different from host-side actions
+  run by a daemon; the latter will get their own key when they exist (unknown keys are
+  rejected today).
+- `apply` needs a config file. With none present it refuses (the built-in defaults contain no
+  profiles), so it can never write anything you did not ask for.
+- The shared DPI slot of a profile in `dpi.profiles` cannot be set from `[profiles.*]`, and
+  `enabled = false` follows the same guards as `profile disable`.
+- Checked by `check`: it reports whether the device matches the config.
 
 ### Restore
 
@@ -203,7 +227,8 @@ they consume something it re-emits; never two grabbers on the same node.
 - A commit takes roughly 270 ms on the tested mouse (measured via `g502ctl dpi set`),
   so the pointer speed changes that long after a press. Presses during a commit are
   coalesced into the next one, not lost.
-- No GUI yet; `[profiles.N].color` in the config is only compared by `check`, never written.
+- No GUI yet. Host-side actions (key combos, commands, multi-step macros) are not implemented;
+  multi-event macros stored in the mouse show up in `config export` as comments.
 - LED brightness is unreliable on the tested mouse: ratbagd reported 255 at first, then 0 for every
   LED after commits, while the LEDs kept their colour. `led set --brightness` writes and reads
   back the value, but its physical effect was not verified.

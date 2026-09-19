@@ -34,3 +34,5 @@ LED syntax in current ratbagctl: `ratbagctl DEV profile P led N set mode on colo
 
 On 2026-09-19 (Fedora 44, KDE Plasma/Wayland, ratbagd API 2) `g502ctl check`
 reported exactly the button table, LED colours and slot-1 state above.
+
+The same layout as a config for `g502ctl apply`: [`packaging/config.baseline.toml`](../packaging/config.baseline.toml).

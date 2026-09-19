@@ -1,0 +1,109 @@
+# The layout recorded in baseline/README.md, as a config.
+# Profile 0 (blue): normal buttons. Profile 1 (red): side buttons send F13/F14 for g502d.
+# Profiles 2-4 are disabled. Nothing here touches DPI: that is [dpi] + g502d.
+
+[device]
+vendor = 0x046d
+product = 0xc08b
+
+[dpi]
+values = [1000, 1800, 2400, 3200, 4000]
+shared_slot = 1
+profiles = [0, 1]
+
+[profiles.0]
+enabled = true
+report_rate = 1000
+color = "0000ff"
+
+[profiles.0.leds.0]
+mode = "on"
+
+[profiles.0.leds.1]
+mode = "on"
+
+[profiles.0.buttons.0]
+onboard = "button 1"
+
+[profiles.0.buttons.1]
+onboard = "button 2"
+
+[profiles.0.buttons.2]
+onboard = "button 3"
+
+[profiles.0.buttons.3]
+onboard = "button 4"
+
+[profiles.0.buttons.4]
+onboard = "button 5"
+
+[profiles.0.buttons.5]
+onboard = "special resolution-alternate"
+
+[profiles.0.buttons.6]
+onboard = "button 6"
+
+[profiles.0.buttons.7]
+onboard = "button 7"
+
+[profiles.0.buttons.8]
+onboard = "special profile-cycle-up"
+
+[profiles.0.buttons.9]
+onboard = "button 8"
+
+[profiles.0.buttons.10]
+onboard = "button 9"
+
+[profiles.1]
+enabled = true
+report_rate = 1000
+color = "ff0000"
+
+[profiles.1.leds.0]
+mode = "on"
+
+[profiles.1.leds.1]
+mode = "on"
+
+[profiles.1.buttons.0]
+onboard = "button 1"
+
+[profiles.1.buttons.1]
+onboard = "button 2"
+
+[profiles.1.buttons.2]
+onboard = "button 3"
+
+[profiles.1.buttons.3]
+onboard = "button 4"
+
+[profiles.1.buttons.4]
+onboard = "button 5"
+
+[profiles.1.buttons.5]
+onboard = "special resolution-alternate"
+
+[profiles.1.buttons.6]
+onboard = "macro KEY_F13"
+
+[profiles.1.buttons.7]
+onboard = "macro KEY_F14"
+
+[profiles.1.buttons.8]
+onboard = "special profile-cycle-up"
+
+[profiles.1.buttons.9]
+onboard = "button 8"
+
+[profiles.1.buttons.10]
+onboard = "button 9"
+
+[profiles.2]
+enabled = false
+
+[profiles.3]
+enabled = false
+
+[profiles.4]
+enabled = false

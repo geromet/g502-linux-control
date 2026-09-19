@@ -1,18 +1,44 @@
-# ~/.config/g502-linux-control/config.toml
-# Every key is optional; these are the built-in defaults (the tested setup).
+# ~/.config/g502-linux-control/config.toml  (or $G502_CONFIG)
+#
+# [device] and [dpi] are used by g502d. [profiles.*] is only ever used by
+# `g502ctl apply` (and compared by `g502ctl check`); g502d never writes it.
+# Everything is optional, and apply only touches what you name here.
+#
+# Start from your own mouse:  g502ctl config export ~/.config/g502-linux-control/config.toml
+# The exact layout from baseline/README.md:  packaging/config.baseline.toml
 
 [device]
 vendor = 0x046d
 product = 0xc08b
 
 [dpi]
-values = [1000, 1800, 2400, 3200, 4000]  # ascending stages
-shared_slot = 1      # resolution slot holding the shared DPI
-profiles = [0, 1]    # profiles kept in sync
-
-# Only compared against the device by `g502ctl check` (nothing is written).
-[profiles.0]
-color = "0000ff"
+values = [1000, 1800, 2400, 3200, 4000]  # ascending stages g502d steps through
+shared_slot = 1                           # resolution slot that holds the shared DPI
+profiles = [0, 1]                         # profiles g502d keeps in sync
 
 [profiles.1]
+enabled = true          # false = disable the profile (refused for dpi.profiles)
+report_rate = 1000      # 125 | 250 | 500 | 1000
+color = "ff0000"        # shorthand: colour of every LED in this profile
+
+[profiles.1.leds.0]     # per-LED settings win over the shorthand
+mode = "on"             # off | on | cycle | breathing
 color = "ff0000"
+brightness = 255        # 0-255 (see README: unreliable on the G502 HERO)
+
+# Button actions stored in the mouse ("onboard"). Same words as `g502ctl button set`:
+#   none | button N | special NAME | key KEY_X | macro KEY_X
+[profiles.1.buttons.5]
+onboard = "special resolution-alternate"
+
+[profiles.1.buttons.6]  # g502d listens for these two on profile 1: keep them
+onboard = "macro KEY_F13"
+
+[profiles.1.buttons.7]
+onboard = "macro KEY_F14"
+
+# Resolution slots. The shared slot (dpi.shared_slot) of a profile in dpi.profiles
+# is g502d's; other slots can be set:
+[profiles.1.resolutions.2]
+dpi = 2400
+enabled = true

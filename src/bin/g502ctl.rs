@@ -7,6 +7,7 @@ use g502_linux_control::{
     dpi::{DpiBackend, Step, apply_batch},
     input,
     ratbag::{Controller, Ratbag, RawValue, Snapshot, describe, lock_writes, parse_action, parse_led_mode},
+    apply as apply_mod,
     restore as plan_mod,
 };
 use std::{
@@ -30,11 +31,16 @@ usage: g502ctl <command>
                     ACTION: none | button N | special NAME | key KEY_X | macro KEY_X
                     (special names: see `g502ctl check`, e.g. resolution-alternate,
                     profile-cycle-up, wheel-left)
+  apply             write the config file's [profiles.*] settings to the device
+                    (buttons, LEDs, report rate, slots; only what the file names)
+  config export [FILE]
+                    print a config describing the device as it is now
+                    (refuses to overwrite an existing FILE)
   profile enable|disable PROFILE
   profile rate PROFILE 125|250|500|1000
   led set PROFILE LED [--mode off|on|cycle|breathing] [--color RRGGBB] [--brightness 0-255]
 
-restore, button set, led set and profile write to the mouse: they show a diff, ask to
+restore, apply, button set, led set and profile write to the mouse: they show a diff, ask to
 confirm, save the previous state as a backup, commit once and verify.
   --dry-run   only show the diff
   --yes       do not ask (required when not on a terminal)
@@ -55,7 +61,7 @@ fn main() {
     let mode = Mode { dry_run, yes };
     // These flags only make sense for commands that ask before writing; never
     // let them silently ride along on e.g. `dpi up`.
-    if (dry_run || yes) && !matches!(args.first(), Some(&("restore" | "button" | "led" | "profile"))) {
+    if (dry_run || yes) && !matches!(args.first(), Some(&("restore" | "apply" | "button" | "led" | "profile"))) {
         eprint!("{USAGE}");
         exit(2);
     }
@@ -69,6 +75,9 @@ fn main() {
         ["backup", file] => backup(Some(file)),
         ["restore", file] => restore(file, mode),
         ["button", "set", p, b, ref action @ ..] if !action.is_empty() => button_set(p, b, action, mode),
+        ["apply"] => apply(mode),
+        ["config", "export"] => config_export(None),
+        ["config", "export", file] => config_export(Some(file)),
         ["profile", "enable", p] => profile_disabled(p, false, mode),
         ["profile", "disable", p] => profile_disabled(p, true, mode),
         ["profile", "rate", p, hz] => profile_rate(p, hz, mode),
@@ -255,6 +264,34 @@ fn write_snapshot(rb: &Ratbag, target: &Snapshot, label: &str, mode: Mode) -> Re
     }
 }
 
+fn apply(mode: Mode) -> Result<()> {
+    let (cfg, path) = Config::load()?;
+    let Some(path) = path else {
+        bail!("no config file at {} (or $G502_CONFIG); nothing to apply. `g502ctl config export` writes a starting point", Config::default_path().display());
+    };
+    if cfg.profiles.is_empty() {
+        bail!("{} has no [profiles.*] sections; nothing to apply", path.display());
+    }
+    let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
+    let target = apply_mod::overlay(&rb.snapshot()?, &cfg)?;
+    write_snapshot(&rb, &target, &path.display().to_string(), mode)
+}
+
+fn config_export(file: Option<&str>) -> Result<()> {
+    let cfg = load_config()?;
+    let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
+    let text = apply_mod::export(&rb.snapshot()?, &cfg)?;
+    match file {
+        Some(f) => {
+            let mut out = std::fs::File::create_new(f).map_err(|e| anyhow::anyhow!("{f}: {e} (not overwriting)"))?;
+            out.write_all(text.as_bytes())?;
+            eprintln!("wrote {f}");
+        }
+        None => print!("{text}"),
+    }
+    Ok(())
+}
+
 fn index(what: &str, s: &str) -> Result<u32> {
     s.parse().map_err(|_| anyhow::anyhow!("{what} must be a number, got {s:?}"))
 }
@@ -437,11 +474,11 @@ fn check() -> Result<()> {
         None => r.warn("no readable evdev endpoint with KEY_F13/KEY_F14 (permissions? profile without F13/F14 macros?)"),
     }
 
-    for (i, p) in &cfg.profiles {
-        let want = parse_color(&p.color)?;
-        let have = snap.profiles.get(*i as usize).and_then(|pr| pr.leds.first()).and_then(|l| parse_color(&l.color).ok());
-        if have != Some(want) {
-            r.warn(format!("profile {i} LED 0 is {} on the device, config says {} (not changed)", have.map_or("?".into(), |(r, g, b)| format!("{r:02x}{g:02x}{b:02x}")), p.color));
+    if !cfg.profiles.is_empty() {
+        match apply_mod::overlay(&snap, &cfg).and_then(|t| plan_mod::plan(&snap, &t)) {
+            Ok(p) if p.is_empty() => r.ok("device matches the [profiles.*] settings in the config"),
+            Ok(p) => r.warn(format!("device differs from the config in {} place(s); see `g502ctl apply --dry-run`", p.len())),
+            Err(e) => r.fail(format!("config cannot be applied to this device: {e:#}")),
         }
     }
 

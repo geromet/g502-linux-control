@@ -437,8 +437,37 @@ pub fn parse_action(words: &[&str]) -> Result<(u32, Option<RawValue>)> {
     }
 }
 
+/// The inverse of `parse_action`: the config/CLI spelling of a mapping, or
+/// `None` if it has no such spelling (multi-event macros, unknown ids/keys).
+pub fn action_string(kind: u32, value: &Option<RawValue>) -> Option<String> {
+    Some(match (kind, value) {
+        (0, _) => "none".into(),
+        (1, Some(RawValue::Number(n))) => format!("button {n}"),
+        (2, Some(RawValue::Number(n))) => {
+            let name = special_name(*n);
+            special_id(&name)?;
+            format!("special {name}")
+        }
+        (3, Some(RawValue::Number(n))) => format!("key {}", parseable_key_name(*n)?),
+        (4, Some(RawValue::MacroEvents(ev))) => match ev[..] {
+            [[1, a], [2, b]] if a == b => format!("macro {}", parseable_key_name(a)?),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+fn parseable_key_name(code: u32) -> Option<String> {
+    let name = key_name(code);
+    (name.starts_with("KEY_") && key_code(&name).ok() == Some(code)).then_some(name)
+}
+
 /// libratbag `Led.Mode` values (confirmed against ratbagctl's own enum).
 pub const LED_MODES: [&str; 4] = ["off", "on", "cycle", "breathing"];
+
+pub fn led_mode_name(mode: u32) -> Option<&'static str> {
+    LED_MODES.get(mode as usize).copied()
+}
 
 pub fn parse_led_mode(name: &str) -> Result<u32> {
     LED_MODES.iter().position(|m| *m == name).map(|i| i as u32).with_context(|| format!("unknown LED mode {name:?}; use one of: {}", LED_MODES.join(", ")))
