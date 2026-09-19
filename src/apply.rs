@@ -117,6 +117,40 @@ pub fn with_report_rate(current: &Snapshot, profile: u32, hz: u32) -> Result<Sna
     Ok(t)
 }
 
+/// `current` with a profile enabled or disabled. Disabling follows the safety
+/// rules of `check_can_disable` (not a profile g502d syncs, not the active or last
+/// enabled profile); an already-disabled profile may be stated as disabled again.
+pub fn with_profile_disabled(current: &Snapshot, dpi_profiles: &[u32], profile: u32, disabled: bool) -> Result<Snapshot> {
+    let cur = current.profiles.get(profile as usize).with_context(|| format!("device has no profile {profile}"))?;
+    if disabled && !cur.disabled {
+        check_can_disable(current, dpi_profiles, profile)?;
+    }
+    let mut t = current.clone();
+    t.profiles[profile as usize].disabled = disabled;
+    Ok(t)
+}
+
+/// `current` with one resolution slot changed. The shared DPI slot of a profile
+/// that g502d syncs is refused: the daemon owns it.
+pub fn with_slot(current: &Snapshot, cfg: &Config, profile: u32, slot: u32, dpi: Option<u32>, enabled: Option<bool>) -> Result<Snapshot> {
+    if slot == cfg.dpi.shared_slot && cfg.dpi.profiles.contains(&profile) {
+        bail!("slot {slot} of profile {profile} holds the shared DPI managed by g502d; change dpi.values in the config or use `g502ctl dpi`");
+    }
+    let mut t = current.clone();
+    let r = t
+        .profiles
+        .get_mut(profile as usize)
+        .and_then(|p| p.resolutions.get_mut(slot as usize))
+        .with_context(|| format!("device has no profile {profile} resolution slot {slot}"))?;
+    if let Some(d) = dpi {
+        r.dpi = Some(d);
+    }
+    if let Some(e) = enabled {
+        r.is_disabled = !e;
+    }
+    Ok(t)
+}
+
 /// A complete config for the device as it is now. Applying it again is an empty
 /// diff. The daemon-managed shared DPI slot is left out (that is `[dpi]`'s job),
 /// and disabled profiles only record that they are disabled. Things that have no
@@ -285,6 +319,30 @@ mod tests {
         assert_eq!(ok.len(), 1);
         assert!(plan(&dev, &with_report_rate(&dev, 0, 333).unwrap()).is_err());
         assert!(with_report_rate(&dev, 9, 500).is_err());
+    }
+
+    #[test]
+    fn with_profile_disabled_follows_the_safety_rules() {
+        let dev = device();
+        assert!(with_profile_disabled(&dev, &[0, 1], 1, true).is_err(), "daemon-synced");
+        assert!(with_profile_disabled(&dev, &[], 0, true).is_err(), "active");
+        assert!(with_profile_disabled(&dev, &[0, 1], 2, true).is_ok(), "already disabled");
+        let p = plan(&dev, &with_profile_disabled(&dev, &[0, 1], 2, false).unwrap()).unwrap();
+        assert_eq!(p.len(), 1);
+        assert!(p[0].summary.contains("profile 2: disabled -> enabled"), "{}", p[0].summary);
+        assert!(with_profile_disabled(&dev, &[], 9, true).is_err());
+    }
+
+    #[test]
+    fn with_slot_protects_the_daemons_slot() {
+        let dev = device();
+        let cfg = Config::default(); // shared slot 1, profiles [0, 1]
+        assert!(with_slot(&dev, &cfg, 0, 1, Some(2000), None).is_err());
+        assert!(with_slot(&dev, &cfg, 2, 1, Some(2000), None).is_ok(), "profile 2 is not synced");
+        let p = plan(&dev, &with_slot(&dev, &cfg, 0, 2, Some(2000), Some(false)).unwrap()).unwrap();
+        assert_eq!(p.len(), 2, "{:?}", p.iter().map(|p| &p.summary).collect::<Vec<_>>());
+        assert!(with_slot(&dev, &cfg, 0, 9, Some(2000), None).is_err());
+        assert!(plan(&dev, &with_slot(&dev, &cfg, 0, 2, Some(1234), None).unwrap()).is_err(), "unsupported DPI");
     }
 
     #[test]

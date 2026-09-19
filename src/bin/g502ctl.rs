@@ -34,6 +34,8 @@ usage: g502ctl <command>
   config export [FILE]
                     print a config describing the device as it is now
                     (refuses to overwrite an existing FILE)
+  identify          press physical buttons; shows which button index each one is
+                    (Ctrl-C to stop)
   profile enable|disable PROFILE
   profile rate PROFILE 125|250|500|1000
   led set PROFILE LED [--mode off|on|cycle|breathing] [--color RRGGBB] [--brightness 0-255]
@@ -69,6 +71,7 @@ fn main() {
         ["dpi", "down"] => dpi_step(Step::Down),
         ["dpi", "set", n] => dpi_set(n),
         ["check"] => check(),
+        ["identify"] => identify(),
         ["backup"] => backup(None),
         ["backup", file] => backup(Some(file)),
         ["restore", file] => restore(file, mode),
@@ -297,12 +300,7 @@ fn profile_disabled(profile: &str, disable: bool, mode: Mode) -> Result<()> {
     let p = index("PROFILE", profile)?;
     let cfg = load_config()?;
     let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
-    let mut target = rb.snapshot()?;
-    if disable {
-        plan_mod::check_can_disable(&target, &cfg.dpi.profiles, p)?;
-    }
-    let pr = target.profiles.get_mut(p as usize).ok_or_else(|| anyhow::anyhow!("device has no profile {p}"))?;
-    pr.disabled = disable;
+    let target = apply_mod::with_profile_disabled(&rb.snapshot()?, &cfg.dpi.profiles, p, disable)?;
     write_snapshot(&rb, &target, &format!("profile {} {p}", if disable { "disable" } else { "enable" }), mode)
 }
 
@@ -340,6 +338,89 @@ fn led_set(profile: &str, led: &str, opts: &[&str], mode: Mode) -> Result<()> {
     let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
     let target = apply_mod::with_led(&rb.snapshot()?, p, l, new_mode, color.as_deref(), brightness)?;
     write_snapshot(&rb, &target, &format!("led set {p} {l}"), mode)
+}
+
+/// evdev code of "mouse button N" as the kernel's HID layer reports it:
+/// button 1 is BTN_LEFT (0x110), button 2 BTN_RIGHT, ... N is BTN_MOUSE + N - 1.
+fn mouse_button_code(n: u32) -> u16 {
+    0x110 + (n as u16).saturating_sub(1)
+}
+
+/// Which (profile, button) pairs would produce this evdev key code?
+fn buttons_for_code(snap: &Snapshot, code: u16) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in snap.profiles.iter().filter(|p| !p.disabled) {
+        for b in &p.buttons {
+            let hit = match (&b.raw_type, &b.raw_value) {
+                (1, Some(RawValue::Number(n))) => mouse_button_code(*n) == code,
+                (4, Some(RawValue::MacroEvents(ev))) => ev.first().is_some_and(|e| e[0] == 1 && e[1] == u32::from(code)),
+                _ => false,
+            };
+            if hit {
+                out.push(format!("profile {} button {} ({})", p.index, b.index, b.action));
+            }
+        }
+    }
+    out
+}
+
+/// Press each physical button on the mouse and see which button index it is.
+/// Read-only. Buttons whose action is a special function (sniper, profile
+/// cycle, ...) send no event, so they stay silent; that is itself a clue.
+fn identify() -> Result<()> {
+    let cfg = load_config()?;
+    let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
+    let snap = rb.snapshot()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut opened = 0;
+    for (path, mut dev) in evdev::enumerate() {
+        let id = dev.input_id();
+        if id.vendor() != cfg.device.vendor || id.product() != cfg.device.product {
+            continue;
+        }
+        opened += 1;
+        eprintln!("listening on {} ({})", path.display(), dev.name().unwrap_or("?"));
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(events) = dev.fetch_events() {
+                for ev in events {
+                    if tx.send((ev.event_type(), ev.code(), ev.value())).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+    drop(tx);
+    if opened == 0 {
+        bail!("no readable input device for {:04x}:{:04x}", cfg.device.vendor, cfg.device.product);
+    }
+    eprintln!("Press one physical button at a time, then note what it says. Ctrl-C to stop.");
+    eprintln!("(If g502d is running it holds the F13/F14 endpoint, so those presses will not show; use profile 0's mapping.)\n");
+    for (ty, code, value) in rx {
+        match (ty, value) {
+            (evdev::EventType::KEY, 1) => {
+                let name = format!("{:?}", evdev::KeyCode::new(code));
+                let hits = buttons_for_code(&snap, code);
+                if hits.is_empty() {
+                    println!("{name} (code {code:#x}): not mapped by any enabled profile");
+                } else {
+                    println!("{name} (code {code:#x}): {}", hits.join("; "));
+                }
+            }
+            (evdev::EventType::RELATIVE, v) if code == 8 || code == 6 => {
+                let what = match (code, v.signum()) {
+                    (8, 1) => "wheel scrolled up",
+                    (8, _) => "wheel scrolled down",
+                    (_, 1) => "wheel tilted right (HWHEEL)",
+                    _ => "wheel tilted left (HWHEEL)",
+                };
+                println!("{what}");
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------- check

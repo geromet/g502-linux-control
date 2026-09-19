@@ -10,18 +10,19 @@
 //! the rendering without a display server session to look at. In that mode
 //! G502_GUI_PROFILE=N picks the profile tab, G502_GUI_EDIT=P:B:KIND:VALUE opens
 //! an editor (`P:B:KIND:VALUE` with KIND none|button|special|key|macro,
-//! `led:P:L:MODE:COLOR:BRIGHTNESS` or `rate:P:HZ`), G502_GUI_APPLY=1
+//! `led:P:L:MODE:COLOR:BRIGHTNESS`, `rate:P:HZ`,
+//! `profile:P:enable|disable` or `slot:P:S:DPI:enabled|disabled`), G502_GUI_APPLY=1
 //! presses Apply once loaded, and the window is tall enough to show everything.
 
 use g502_linux_control::{
-    apply::{overlay, with_button, with_led, with_report_rate},
+    apply::{overlay, with_button, with_led, with_profile_disabled, with_report_rate, with_slot},
     config::{Config, parse_color},
     ratbag::{LED_MODES, ProfileInfo, Ratbag, RawValue, Snapshot, led_mode_name, parse_led_mode, special_names},
     restore::{plan, write},
 };
 use iced::{
     Background, Border, Color, Element, Length, Task, Theme, window,
-    widget::{Space, button, column, container, pick_list, row, scrollable, text, text_input},
+    widget::{Space, button, checkbox, column, container, pick_list, row, scrollable, text, text_input},
 };
 use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 
@@ -29,6 +30,8 @@ fn main() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
         .title("G502 Linux Control")
         .theme(theme)
+        // Wayland app id: matches packaging/g502-gui.desktop so the desktop shows its icon and name.
+        .settings(iced::Settings { id: Some("g502-gui".into()), ..Default::default() })
         .window_size((920.0, if std::env::var_os("G502_GUI_SCREENSHOT").is_some() { 1500.0 } else { 760.0 }))
         .run()
 }
@@ -140,6 +143,14 @@ struct LedEdit {
     brightness: String,
 }
 
+#[derive(Clone)]
+struct SlotEdit {
+    profile: u32,
+    slot: u32,
+    dpi: String,
+    enabled: bool,
+}
+
 /// What is being edited. Each variant knows how to build the snapshot the
 /// device should end up with; the preview and the write both start from that.
 #[derive(Clone)]
@@ -147,6 +158,9 @@ enum Edit {
     Button(ButtonEdit),
     Led(LedEdit),
     Rate { profile: u32, hz: u32 },
+    /// Enable or disable a whole profile.
+    Profile { profile: u32, disable: bool },
+    Slot(SlotEdit),
 }
 
 impl Edit {
@@ -154,7 +168,8 @@ impl Edit {
         match self {
             Edit::Button(e) => e.profile,
             Edit::Led(e) => e.profile,
-            Edit::Rate { profile, .. } => *profile,
+            Edit::Rate { profile, .. } | Edit::Profile { profile, .. } => *profile,
+            Edit::Slot(e) => e.profile,
         }
     }
 
@@ -163,10 +178,12 @@ impl Edit {
             Edit::Button(e) => format!("profile {} button {}", e.profile, e.button),
             Edit::Led(e) => format!("profile {} LED {}", e.profile, e.led),
             Edit::Rate { profile, .. } => format!("profile {profile} report rate"),
+            Edit::Profile { profile, disable } => format!("profile {profile}: {}", if *disable { "disable" } else { "enable" }),
+            Edit::Slot(e) => format!("profile {} resolution slot {}", e.profile, e.slot),
         }
     }
 
-    fn target(&self, snap: &Snapshot) -> anyhow::Result<Snapshot> {
+    fn target(&self, snap: &Snapshot, cfg: &Config) -> anyhow::Result<Snapshot> {
         match self {
             Edit::Button(e) => with_button(snap, e.profile, e.button, &e.words()),
             Edit::Led(e) => {
@@ -175,6 +192,12 @@ impl Edit {
                 with_led(snap, e.profile, e.led, Some(e.mode), Some(&e.color), Some(brightness))
             }
             Edit::Rate { profile, hz } => with_report_rate(snap, *profile, *hz),
+            Edit::Profile { profile, disable } => with_profile_disabled(snap, &cfg.dpi.profiles, *profile, *disable),
+            Edit::Slot(e) => {
+                let d = e.dpi.trim();
+                let dpi: u32 = d.parse().map_err(|_| anyhow::anyhow!("DPI must be a whole number, got {d:?}"))?;
+                with_slot(snap, cfg, e.profile, e.slot, Some(dpi), Some(e.enabled))
+            }
         }
     }
 }
@@ -187,6 +210,10 @@ enum Message {
     Edit(u32, u32),
     EditLed(u32, u32),
     EditRate(u32),
+    EditProfile(u32, bool),
+    EditSlot(u32, u32),
+    SlotDpi(String),
+    SlotEnabled(bool),
     EditKind(Kind),
     EditValue(String),
     LedMode(u32),
@@ -279,6 +306,32 @@ impl App {
                     && let Some(p) = d.snap.profiles.get(profile as usize)
                 {
                     self.editor = Some(Edit::Rate { profile, hz: p.report_rate });
+                }
+                Task::none()
+            }
+            Message::EditProfile(profile, disable) => {
+                self.notice = None;
+                self.editor = Some(Edit::Profile { profile, disable });
+                Task::none()
+            }
+            Message::EditSlot(profile, slot) => {
+                self.notice = None;
+                if let Load::Ready(d) = &self.load
+                    && let Some(r) = d.snap.profiles.get(profile as usize).and_then(|p| p.resolutions.get(slot as usize))
+                {
+                    self.editor = Some(Edit::Slot(SlotEdit { profile, slot, dpi: r.dpi.map_or(String::new(), |v| v.to_string()), enabled: !r.is_disabled }));
+                }
+                Task::none()
+            }
+            Message::SlotDpi(v) => {
+                if let Some(Edit::Slot(e)) = &mut self.editor {
+                    e.dpi = v;
+                }
+                Task::none()
+            }
+            Message::SlotEnabled(v) => {
+                if let Some(Edit::Slot(e)) = &mut self.editor {
+                    e.enabled = v;
                 }
                 Task::none()
             }
@@ -485,6 +538,21 @@ impl App {
                 .align_y(iced::Center)
                 .into()
             }
+            Edit::Profile { disable, .. } => text(if *disable {
+                "The profile will be disabled: the mouse can no longer switch to it."
+            } else {
+                "The profile will be enabled with the settings it currently has."
+            })
+            .size(14)
+            .into(),
+            Edit::Slot(e) => row![
+                text("DPI").size(14),
+                text_input("e.g. 2400", &e.dpi).on_input(Message::SlotDpi).width(100),
+                checkbox(e.enabled).label("Slot enabled").on_toggle(Message::SlotEnabled),
+            ]
+            .spacing(12)
+            .align_y(iced::Center)
+            .into(),
             Edit::Rate { profile, hz } => {
                 let rates: &[u32] = d.snap.profiles.get(*profile as usize).map_or(&[], |p| &p.report_rates);
                 row![text("Report rate").size(14), pick_list(rates, Some(*hz), Message::RateHz).width(120), text("Hz").size(14)]
@@ -495,7 +563,7 @@ impl App {
         };
 
         // Exactly what would change, computed by the same code that writes it.
-        let preview = edit.target(&d.snap).and_then(|t| plan(&d.snap, &t));
+        let preview = edit.target(&d.snap, &d.cfg).and_then(|t| plan(&d.snap, &t));
         let (lines, valid): (Element<Message>, bool) = match &preview {
             Ok(p) if p.is_empty() => (text("No change: the device already has this.").size(14).style(muted).into(), false),
             Ok(p) => (column(p.iter().map(|c| text(c.summary.clone()).size(14).into())).spacing(4).into(), true),
@@ -539,10 +607,22 @@ impl App {
 
     fn profile_panel<'a>(&'a self, d: &'a Data, p: &'a ProfileInfo) -> Element<'a, Message> {
         if p.disabled {
-            return panel(
-                &format!("Profile {}", p.index),
-                text("Disabled on the device. Enable it with `g502ctl profile enable`.").size(14).into(),
-            );
+            let editor: Option<Element<Message>> = self.editor.as_ref().filter(|e| e.profile() == p.index).map(|e| self.editor_panel(d, e, false));
+            return column![
+                panel(
+                    &format!("Profile {}", p.index),
+                    row![
+                        text("Disabled on the device.").size(14).width(Length::Fill),
+                        button(text("Enable").size(13))
+                            .on_press_maybe((!self.busy && !matches!(&self.editor, Some(Edit::Profile { .. }))).then_some(Message::EditProfile(p.index, false))),
+                    ]
+                    .align_y(iced::Center)
+                    .into(),
+                ),
+                editor.unwrap_or_else(|| Space::new().into()),
+            ]
+            .spacing(18)
+            .into();
         }
         let synced = d.cfg.dpi.profiles.contains(&p.index);
 
@@ -592,7 +672,15 @@ impl App {
             } else {
                 ""
             };
-            text(format!("Slot {}: {dpi}{note}", r.index)).size(14).into()
+            let edit: Element<Message> = if shared {
+                Space::new().into()
+            } else {
+                button(text("Edit").size(13))
+                    .on_press_maybe((!self.busy && !matches!(&self.editor, Some(Edit::Slot(e)) if e.profile == p.index && e.slot == r.index)).then_some(Message::EditSlot(p.index, r.index)))
+                    .style(button::secondary)
+                    .into()
+            };
+            row![text(format!("Slot {}: {dpi}{note}", r.index)).size(14).width(Length::Fill), edit].align_y(iced::Center).into()
         }))
         .spacing(4);
 
@@ -621,7 +709,20 @@ impl App {
         }))
         .spacing(6);
 
+        let toggle: Element<Message> = if synced {
+            text(format!("Profile {} keeps the shared DPI in sync through g502d, so it cannot be disabled here.", p.index)).size(13).style(muted).into()
+        } else {
+            row![
+                text("This profile is enabled.").size(14).width(Length::Fill),
+                button(text("Disable").size(13))
+                    .on_press_maybe((!self.busy && !matches!(&self.editor, Some(Edit::Profile { .. }))).then_some(Message::EditProfile(p.index, true)))
+                    .style(button::secondary),
+            ]
+            .align_y(iced::Center)
+            .into()
+        };
         column![
+            toggle,
             panel(&format!("Profile {} - buttons", p.index), buttons.into()),
             editor.unwrap_or_else(|| Space::new().into()),
             panel(
@@ -666,7 +767,7 @@ fn write_edit(edit: &Edit) -> Result<String, String> {
     let run = || -> anyhow::Result<String> {
         let (cfg, _) = Config::load()?;
         let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
-        let target = edit.target(&rb.snapshot()?)?;
+        let target = edit.target(&rb.snapshot()?, &cfg)?;
         let done = write(&rb, &target)?;
         Ok(match done.backup {
             Some(b) => format!("Wrote {} change(s) to {}. Previous state saved to {}", done.written, edit.title(), b.display()),
@@ -676,7 +777,8 @@ fn write_edit(edit: &Edit) -> Result<String, String> {
     run().map_err(|e| format!("{e:#}"))
 }
 
-/// Dev hook syntax: `P:B:KIND:VALUE`, `led:P:L:MODE:COLOR:BRIGHTNESS`, `rate:P:HZ`.
+/// Dev hook syntax: `P:B:KIND:VALUE`, `led:P:L:MODE:COLOR:BRIGHTNESS`, `rate:P:HZ`,
+/// `profile:P:enable|disable`, `slot:P:S:DPI:enabled|disabled`.
 fn parse_edit_hook(v: &str) -> Option<Edit> {
     let parts: Vec<&str> = v.splitn(6, ':').collect();
     match parts[..] {
@@ -688,6 +790,8 @@ fn parse_edit_hook(v: &str) -> Option<Edit> {
             brightness: brightness.to_string(),
         })),
         ["rate", p, hz] => Some(Edit::Rate { profile: p.parse().ok()?, hz: hz.parse().ok()? }),
+        ["profile", p, what] => Some(Edit::Profile { profile: p.parse().ok()?, disable: what == "disable" }),
+        ["slot", p, sl, dpi, state] => Some(Edit::Slot(SlotEdit { profile: p.parse().ok()?, slot: sl.parse().ok()?, dpi: dpi.to_string(), enabled: state != "disabled" })),
         [p, b, kind, ..] => {
             let value = v.splitn(4, ':').nth(3).unwrap_or("").to_string();
             Some(Edit::Button(ButtonEdit { profile: p.parse().ok()?, button: b.parse().ok()?, kind: Kind::from_word(kind)?, value }))

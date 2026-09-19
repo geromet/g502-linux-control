@@ -86,9 +86,10 @@ its action, resolution slots, report rate and LED colours. It marks each action 
 those two kinds of action behave differently. It also says whether the device matches
 your config.
 
-**Editing:** every button, every LED and each profile's report rate has an *Edit* control
-(buttons: mouse button / special action / keyboard key / key macro / none; LEDs: mode,
-colour, brightness; report rate: the rates the device supports), and the GUI shows the
+**Editing:** every button, LED and non-shared resolution slot, each profile's report rate,
+and profile enable/disable has an *Edit* (or Enable/Disable) control (buttons: mouse button /
+special action / keyboard key / key macro / none; LEDs: mode, colour, brightness; slots: DPI
+and enabled; report rate: the rates the device supports), and the GUI shows the
 exact diff that would be written
 (computed by the same code that writes it, so invalid input shows an error and Apply
 stays disabled). *Apply* goes through the same path as `g502ctl` (write lock, backup of
@@ -96,14 +97,19 @@ the previous state, one commit, verify by re-reading) and the window then re-rea
 device. Nothing is written before Apply. It warns if you are about to change one of the
 F13/F14 buttons `g502d` depends on.
 
-Not in the GUI yet: enabling/disabling profiles, resolution slot DPIs, the DPI stages in
-the config, and restore/apply (use `g502ctl`), and an "active profile" indicator (ratbagd's value for it is unreliable on this mouse,
+The shared DPI slot and daemon-synced profiles are deliberately not editable there (g502d
+owns them). Not in the GUI: the DPI stages in the config, and restore/apply (use `g502ctl`),
+and an "active profile" indicator (ratbagd's value for it is unreliable on this mouse,
 see below). Button labels are `Button N` because the mapping from index to physical
-button has not been verified on the hardware. The GUI is behind a cargo feature so a plain
+button has not been verified on the hardware (`g502ctl identify` is for finding out). The GUI is behind a cargo feature so a plain
 `cargo install --path .` (daemon and CLI) stays small.
 
+A launcher entry is in [`packaging/g502-gui.desktop`](packaging/g502-gui.desktop)
+(`install -Dm644 packaging/g502-gui.desktop ~/.local/share/applications/`); it starts
+`~/.cargo/bin/g502-gui`.
+
 For development, `G502_GUI_SCREENSHOT=out.png` makes the window save a picture of its own
-contents once loaded and exit; `G502_GUI_PROFILE=N`, `G502_GUI_EDIT` (`P:B:KIND:VALUE`, `led:P:L:MODE:COLOR:BRIGHTNESS` or `rate:P:HZ`) and
+contents once loaded and exit; `G502_GUI_PROFILE=N`, `G502_GUI_EDIT` (`P:B:KIND:VALUE`, `led:P:L:MODE:COLOR:BRIGHTNESS` or `rate:P:HZ`, `profile:P:enable|disable`, `slot:P:S:DPI:enabled|disabled`) and
 `G502_GUI_APPLY=1` (which *does* write to the mouse) drive it without a mouse or keyboard.
 
 ### Permissions
@@ -131,6 +137,7 @@ g502ctl apply             write the config file's [profiles.*] settings to the d
 g502ctl config export [FILE]   print a config describing the device as it is now
 g502ctl profile enable|disable P
 g502ctl profile rate P 125|250|500|1000
+g502ctl identify          press physical buttons; shows which button index each one is
 g502ctl led set P L [--mode off|on|cycle|breathing] [--color RRGGBB] [--brightness 0-255]
 ```
 
@@ -265,7 +272,7 @@ they consume something it re-emits; never two grabbers on the same node.
 - A commit takes roughly 270 ms on the tested mouse (measured via `g502ctl dpi set`),
   so the pointer speed changes that long after a press. Presses during a commit are
   coalesced into the next one, not lost.
-- The GUI edits button actions, LEDs and report rates only. Host-side actions (key combos, commands, multi-step macros) are not implemented;
+- The GUI edits buttons, LEDs, non-shared slots, report rates and profile enable/disable only. Host-side actions (key combos, commands, multi-step macros) are not implemented;
   multi-event macros stored in the mouse show up in `config export` as comments.
 - LED brightness is unreliable on the tested mouse: ratbagd reported 255 at first, then 0 for every
   LED after commits, while the LEDs kept their colour. `led set --brightness` writes and reads
