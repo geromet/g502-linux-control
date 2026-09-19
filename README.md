@@ -93,10 +93,12 @@ g502ctl check             read-only compatibility check + full device report
 g502ctl backup [FILE]     dump the current device configuration as TOML
 g502ctl restore FILE      write a backup back
 g502ctl button set P B ACTION   ACTION: none | button N | special NAME | key KEY_X | macro KEY_X
+g502ctl profile enable|disable P
+g502ctl profile rate P 125|250|500|1000
 g502ctl led set P L [--mode off|on|cycle|breathing] [--color RRGGBB] [--brightness 0-255]
 ```
 
-`restore`, `button set` and `led set` share one write path: show a diff, ask (or `--yes`;
+`restore`, `button set`, `led set` and `profile` share one write path: show a diff, ask (or `--yes`;
 `--dry-run` only shows the diff), save the previous state as a backup, commit once, then
 re-read the device and fail loudly if it does not match. The flags are rejected on every
 other command, so `g502ctl dpi up --yes` cannot do anything unexpected. Special action names:
@@ -157,6 +159,13 @@ Not restored: which profile/resolution is currently active or default (ratbagd a
 those immediately rather than staging them) and LED effect duration.
 
 ### ratbagd D-Bus notes
+
+- `Profile.IsActive` is not trustworthy on the tested mouse. After a few commits ratbagd
+  reported a *disabled* profile (2) as the active one, and profile 0 as inactive, while the
+  mouse was in use. It is the same class of problem as the stale active-DPI slot described
+  above. `profile disable` refuses to disable "the active profile" using this value, so
+  that guard is best-effort. `Profile.SetActive` returns 0 and does switch the mouse,
+  but `g502ctl` has no command for it because its result cannot be verified through ratbagd.
 
 - `Resolution` is typed `v` and arrives double-wrapped (`Value(U32(..))` inside the
   property variant), so zbus' typed `TryFrom` fails on read. Writing needs an explicit

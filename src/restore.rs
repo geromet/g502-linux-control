@@ -137,6 +137,22 @@ pub fn plan(current: &Snapshot, target: &Snapshot) -> Result<Vec<Planned>> {
     Ok(out)
 }
 
+/// Rules for disabling a profile. The first failing rule is the one reported.
+pub fn check_can_disable(snap: &Snapshot, dpi_profiles: &[u32], profile: u32) -> Result<()> {
+    let p = snap
+        .profiles
+        .get(profile as usize)
+        .ok_or_else(|| anyhow::anyhow!("device has no profile {profile}"))?;
+    ensure!(
+        !dpi_profiles.contains(&profile),
+        "profile {profile} is in dpi.profiles, so g502d keeps its DPI in sync; remove it from the config first"
+    );
+    ensure!(!p.is_active, "profile {profile} is the active profile; switch to another profile first");
+    let enabled = snap.profiles.iter().filter(|q| !q.disabled).count();
+    ensure!(p.disabled || enabled > 1, "refusing to disable the only enabled profile");
+    Ok(())
+}
+
 /// Stage every planned change. Does not commit. Enabling a profile is staged
 /// before edits to it, disabling one after, so a profile is never edited while
 /// it would be disabled by this same restore.
@@ -289,6 +305,41 @@ mod tests {
         let mut t = sample();
         t.profiles[0].buttons[0] = button(0, 4, Some(RawValue::MacroEvents(vec![])), "macro");
         assert!(plan(&cur, &t).is_err());
+    }
+
+    fn three_profiles() -> Snapshot {
+        let mut s = sample();
+        for (i, (disabled, active)) in [(false, true), (false, false), (true, false)].into_iter().enumerate() {
+            let mut p = s.profiles[0].clone();
+            p.index = i as u32;
+            p.disabled = disabled;
+            p.is_active = active;
+            if i == 0 {
+                s.profiles.clear();
+            }
+            s.profiles.push(p);
+        }
+        s
+    }
+
+    #[test]
+    fn disable_rules() {
+        let s = three_profiles();
+        assert!(check_can_disable(&s, &[], 1).is_ok());
+        assert!(check_can_disable(&s, &[], 2).is_ok(), "already disabled is fine");
+        let err = |p, dpi: &[u32]| check_can_disable(&s, dpi, p).unwrap_err().to_string();
+        assert!(err(0, &[]).contains("active profile"));
+        assert!(err(1, &[1]).contains("dpi.profiles"));
+        assert!(err(0, &[0]).contains("dpi.profiles"), "sync rule is reported before the active rule");
+        assert!(err(7, &[]).contains("no profile 7"));
+    }
+
+    #[test]
+    fn never_disables_the_last_enabled_profile() {
+        let mut s = three_profiles();
+        s.profiles[1].disabled = true; // only profile 0 (active) is left
+        s.profiles[0].is_active = false;
+        assert!(check_can_disable(&s, &[], 0).unwrap_err().to_string().contains("only enabled profile"));
     }
 
     #[test]

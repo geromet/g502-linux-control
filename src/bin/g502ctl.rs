@@ -30,9 +30,11 @@ usage: g502ctl <command>
                     ACTION: none | button N | special NAME | key KEY_X | macro KEY_X
                     (special names: see `g502ctl check`, e.g. resolution-alternate,
                     profile-cycle-up, wheel-left)
+  profile enable|disable PROFILE
+  profile rate PROFILE 125|250|500|1000
   led set PROFILE LED [--mode off|on|cycle|breathing] [--color RRGGBB] [--brightness 0-255]
 
-restore, button set and led set write to the mouse: they show a diff, ask to
+restore, button set, led set and profile write to the mouse: they show a diff, ask to
 confirm, save the previous state as a backup, commit once and verify.
   --dry-run   only show the diff
   --yes       do not ask (required when not on a terminal)
@@ -53,7 +55,7 @@ fn main() {
     let mode = Mode { dry_run, yes };
     // These flags only make sense for commands that ask before writing; never
     // let them silently ride along on e.g. `dpi up`.
-    if (dry_run || yes) && !matches!(args.first(), Some(&("restore" | "button" | "led"))) {
+    if (dry_run || yes) && !matches!(args.first(), Some(&("restore" | "button" | "led" | "profile"))) {
         eprint!("{USAGE}");
         exit(2);
     }
@@ -67,6 +69,9 @@ fn main() {
         ["backup", file] => backup(Some(file)),
         ["restore", file] => restore(file, mode),
         ["button", "set", p, b, ref action @ ..] if !action.is_empty() => button_set(p, b, action, mode),
+        ["profile", "enable", p] => profile_disabled(p, false, mode),
+        ["profile", "disable", p] => profile_disabled(p, true, mode),
+        ["profile", "rate", p, hz] => profile_rate(p, hz, mode),
         ["led", "set", p, l, ref opts @ ..] if !opts.is_empty() => led_set(p, l, opts, mode),
         _ => {
             eprint!("{USAGE}");
@@ -279,6 +284,33 @@ fn button_set(profile: &str, button: &str, action: &[&str], mode: Mode) -> Resul
     btn.action = describe(kind, &value);
     btn.raw_value = value;
     write_snapshot(&rb, &target, &format!("button set {p} {b}"), mode)
+}
+
+fn profile_disabled(profile: &str, disable: bool, mode: Mode) -> Result<()> {
+    let p = index("PROFILE", profile)?;
+    let cfg = load_config()?;
+    let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
+    let mut target = rb.snapshot()?;
+    if disable {
+        plan_mod::check_can_disable(&target, &cfg.dpi.profiles, p)?;
+    }
+    let pr = target.profiles.get_mut(p as usize).ok_or_else(|| anyhow::anyhow!("device has no profile {p}"))?;
+    pr.disabled = disable;
+    write_snapshot(&rb, &target, &format!("profile {} {p}", if disable { "disable" } else { "enable" }), mode)
+}
+
+fn profile_rate(profile: &str, hz: &str, mode: Mode) -> Result<()> {
+    let p = index("PROFILE", profile)?;
+    let hz = index("rate", hz)?;
+    let cfg = load_config()?;
+    let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
+    let mut target = rb.snapshot()?;
+    let pr = target.profiles.get_mut(p as usize).ok_or_else(|| anyhow::anyhow!("device has no profile {p}"))?;
+    if !pr.report_rates.contains(&hz) {
+        bail!("{hz} Hz is not supported; this profile supports {:?}", pr.report_rates);
+    }
+    pr.report_rate = hz;
+    write_snapshot(&rb, &target, &format!("profile rate {p}"), mode)
 }
 
 fn led_set(profile: &str, led: &str, opts: &[&str], mode: Mode) -> Result<()> {
