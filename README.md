@@ -91,8 +91,21 @@ g502ctl dpi up|down       one stage
 g502ctl dpi set 2400      any DPI the device accepts
 g502ctl check             read-only compatibility check + full device report
 g502ctl backup [FILE]     dump the current device configuration as TOML
-g502ctl restore FILE      write a backup back (diff + confirmation; --dry-run, --yes)
+g502ctl restore FILE      write a backup back
+g502ctl button set P B ACTION   ACTION: none | button N | special NAME | key KEY_X | macro KEY_X
+g502ctl led set P L [--mode off|on|cycle|breathing] [--color RRGGBB] [--brightness 0-255]
 ```
+
+`restore`, `button set` and `led set` share one write path: show a diff, ask (or `--yes`;
+`--dry-run` only shows the diff), save the previous state as a backup, commit once, then
+re-read the device and fail loudly if it does not match. The flags are rejected on every
+other command, so `g502ctl dpi up --yes` cannot do anything unexpected. Special action names:
+`doubleclick, wheel-left, wheel-right, wheel-up, wheel-down, ratchet-mode-switch,
+resolution-cycle-up, resolution-cycle-down, resolution-up, resolution-down,
+resolution-alternate, resolution-default, profile-cycle-up, profile-cycle-down, profile-up,
+profile-down, second-mode, battery-level` (ids from libratbag; which of them the G502 HERO
+honours is up to the firmware, and the post-write verification catches a refusal).
+`button set` warns before changing a KEY_F13/KEY_F14 macro, since `g502d` depends on those.
 
 `check` and `backup` never write to the mouse. Any command that writes DPI first
 verifies that the device is the configured one (matched by USB id from
@@ -181,8 +194,10 @@ they consume something it re-emits; never two grabbers on the same node.
 - A commit takes roughly 270 ms on the tested mouse (measured via `g502ctl dpi set`),
   so the pointer speed changes that long after a press. Presses during a commit are
   coalesced into the next one, not lost.
-- No GUI yet. Buttons and LEDs can only be written through `restore` for now (no `button set`/`led set`
-  commands yet); `[profiles.N].color` is only compared by `check`.
+- No GUI yet; `[profiles.N].color` in the config is only compared by `check`, never written.
+- LED brightness is unreliable on the tested mouse: ratbagd reported 255 at first, then 0 for every
+  LED after commits, while the LEDs kept their colour. `led set --brightness` writes and reads
+  back the value, but its physical effect was not verified.
 - Verified by hand on the tested mouse (2026-09-19): single presses, boundaries, bursts
   (29 presses folded into one commit), unplug/replug reconnect, pointer speed, and no
   F13/F14 leaking to the desktop while the grab is held. Not automated: the real

@@ -6,7 +6,7 @@ use g502_linux_control::{
     config::{Config, parse_color},
     dpi::{DpiBackend, Step, apply_batch},
     input,
-    ratbag::{Controller, Ratbag, RawValue, Snapshot, lock_writes},
+    ratbag::{Controller, Ratbag, RawValue, Snapshot, describe, lock_writes, parse_action, parse_led_mode},
     restore as plan_mod,
 };
 use std::{
@@ -25,10 +25,17 @@ usage: g502ctl <command>
   check             read-only compatibility check and device report
   backup [FILE]     write the full current device configuration as TOML
                     (stdout if no FILE)
-  restore FILE [--dry-run] [--yes]
-                    write a backup back to the device. Shows a diff first and
-                    asks to confirm (--yes skips the prompt, --dry-run only
-                    shows the diff). Saves the pre-restore state as a backup.
+  restore FILE      write a backup back to the device
+  button set PROFILE BUTTON ACTION
+                    ACTION: none | button N | special NAME | key KEY_X | macro KEY_X
+                    (special names: see `g502ctl check`, e.g. resolution-alternate,
+                    profile-cycle-up, wheel-left)
+  led set PROFILE LED [--mode off|on|cycle|breathing] [--color RRGGBB] [--brightness 0-255]
+
+restore, button set and led set write to the mouse: they show a diff, ask to
+confirm, save the previous state as a backup, commit once and verify.
+  --dry-run   only show the diff
+  --yes       do not ask (required when not on a terminal)
 
 Config: $G502_CONFIG or ~/.config/g502-linux-control/config.toml
 ";
@@ -40,7 +47,16 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let yes = args.iter().any(|a| a == "--yes");
+    let args: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a != "--dry-run" && *a != "--yes").collect();
+    let mode = Mode { dry_run, yes };
+    // These flags only make sense for commands that ask before writing; never
+    // let them silently ride along on e.g. `dpi up`.
+    if (dry_run || yes) && !matches!(args.first(), Some(&("restore" | "button" | "led"))) {
+        eprint!("{USAGE}");
+        exit(2);
+    }
     let result = match args[..] {
         ["status"] => status(),
         ["dpi", "up"] => dpi_step(Step::Up),
@@ -49,9 +65,9 @@ fn main() {
         ["check"] => check(),
         ["backup"] => backup(None),
         ["backup", file] => backup(Some(file)),
-        ["restore", file, ref flags @ ..] if flags.iter().all(|f| ["--dry-run", "--yes"].contains(f)) => {
-            restore(file, flags.contains(&"--dry-run"), flags.contains(&"--yes"))
-        }
+        ["restore", file] => restore(file, mode),
+        ["button", "set", p, b, ref action @ ..] if !action.is_empty() => button_set(p, b, action, mode),
+        ["led", "set", p, l, ref opts @ ..] if !opts.is_empty() => led_set(p, l, opts, mode),
         _ => {
             eprint!("{USAGE}");
             exit(2);
@@ -162,26 +178,37 @@ fn state_dir() -> PathBuf {
     base.join("g502-linux-control/backups")
 }
 
-fn restore(file: &str, dry_run: bool, yes: bool) -> Result<()> {
+#[derive(Clone, Copy)]
+struct Mode {
+    dry_run: bool,
+    yes: bool,
+}
+
+fn restore(file: &str, mode: Mode) -> Result<()> {
     let cfg = load_config()?;
     let text = std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("reading {file}: {e}"))?;
     let target: Snapshot = toml::from_str(&text).map_err(|e| anyhow::anyhow!("{file} is not a g502ctl backup: {e}"))?;
     let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
-    let plan = plan_mod::plan(&rb.snapshot()?, &target)?;
+    write_snapshot(&rb, &target, file, mode)
+}
 
+/// The one write path for restore / button set / led set: plan the difference
+/// to `target`, show it, confirm, back up, stage, commit once, verify.
+fn write_snapshot(rb: &Ratbag, target: &Snapshot, label: &str, mode: Mode) -> Result<()> {
+    let plan = plan_mod::plan(&rb.snapshot()?, target)?;
     if plan.is_empty() {
-        println!("device already matches {file}; nothing to do");
+        println!("device already matches {label}; nothing to do");
         return Ok(());
     }
-    println!("{} change(s) from {file}:", plan.len());
+    println!("{} change(s) from {label}:", plan.len());
     for p in &plan {
         println!("  {}", p.summary);
     }
-    if dry_run {
+    if mode.dry_run {
         println!("dry run: nothing was written");
         return Ok(());
     }
-    if !yes {
+    if !mode.yes {
         if !std::io::stdin().is_terminal() {
             bail!("not a terminal; pass --yes to write without asking");
         }
@@ -199,7 +226,7 @@ fn restore(file: &str, dry_run: bool, yes: bool) -> Result<()> {
     // under it in case the device changed while we were asking.
     let _guard = lock_writes()?;
     let before = rb.snapshot()?;
-    let plan = plan_mod::plan(&before, &target)?;
+    let plan = plan_mod::plan(&before, target)?;
 
     let dir = state_dir();
     std::fs::create_dir_all(&dir)?;
@@ -208,12 +235,12 @@ fn restore(file: &str, dry_run: bool, yes: bool) -> Result<()> {
     std::fs::write(&saved, toml::to_string_pretty(&before)?)?;
     println!("saved current state to {}", saved.display());
 
-    plan_mod::stage(&rb, &plan)?;
+    plan_mod::stage(rb, &plan)?;
     rb.commit()?;
 
-    let left = plan_mod::plan(&rb.snapshot()?, &target)?;
+    let left = plan_mod::plan(&rb.snapshot()?, target)?;
     if left.is_empty() {
-        println!("restored {} change(s); device now matches {file}", plan.len());
+        println!("done: {} change(s) written and verified", plan.len());
         Ok(())
     } else {
         for p in &left {
@@ -221,6 +248,73 @@ fn restore(file: &str, dry_run: bool, yes: bool) -> Result<()> {
         }
         bail!("{} difference(s) remain after the write; undo with: g502ctl restore {}", left.len(), saved.display())
     }
+}
+
+fn index(what: &str, s: &str) -> Result<u32> {
+    s.parse().map_err(|_| anyhow::anyhow!("{what} must be a number, got {s:?}"))
+}
+
+fn button_set(profile: &str, button: &str, action: &[&str], mode: Mode) -> Result<()> {
+    let (p, b) = (index("PROFILE", profile)?, index("BUTTON", button)?);
+    let (kind, value) = parse_action(action)?;
+    let cfg = load_config()?;
+    let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
+    let mut target = rb.snapshot()?;
+    let btn = target
+        .profiles
+        .get_mut(p as usize)
+        .and_then(|pr| pr.buttons.get_mut(b as usize))
+        .ok_or_else(|| anyhow::anyhow!("device has no profile {p} button {b}"))?;
+
+    // The daemon needs F13/F14 macros on its buttons; say so before removing one.
+    let f_key = |v: &Option<RawValue>| match v {
+        Some(RawValue::MacroEvents(ev)) if btn.raw_type == 4 => ev.iter().any(|[_, k]| *k == 183 || *k == 184),
+        _ => false,
+    };
+    if f_key(&btn.raw_value) && (kind, &value) != (btn.raw_type, &btn.raw_value) {
+        eprintln!("warning: profile {p} button {b} is a KEY_F13/KEY_F14 macro; g502d's DPI buttons stop working if you change it");
+    }
+
+    btn.raw_type = kind;
+    btn.action = describe(kind, &value);
+    btn.raw_value = value;
+    write_snapshot(&rb, &target, &format!("button set {p} {b}"), mode)
+}
+
+fn led_set(profile: &str, led: &str, opts: &[&str], mode: Mode) -> Result<()> {
+    let (p, l) = (index("PROFILE", profile)?, index("LED", led)?);
+    let (mut new_mode, mut color, mut brightness) = (None, None, None);
+    let mut it = opts.iter();
+    while let Some(&flag) = it.next() {
+        let val = *it.next().ok_or_else(|| anyhow::anyhow!("{flag} needs a value"))?;
+        match flag {
+            "--mode" => new_mode = Some(parse_led_mode(val)?),
+            "--color" => color = Some(parse_color(val).map(|(r, g, b)| format!("{r:02x}{g:02x}{b:02x}"))?),
+            "--brightness" => {
+                let n: u32 = val.parse().ok().filter(|n| *n <= 255).ok_or_else(|| anyhow::anyhow!("brightness must be 0-255, got {val:?}"))?;
+                brightness = Some(n);
+            }
+            other => bail!("unknown option {other:?} (use --mode, --color, --brightness)"),
+        }
+    }
+    let cfg = load_config()?;
+    let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
+    let mut target = rb.snapshot()?;
+    let led = target
+        .profiles
+        .get_mut(p as usize)
+        .and_then(|pr| pr.leds.get_mut(l as usize))
+        .ok_or_else(|| anyhow::anyhow!("device has no profile {p} LED {l}"))?;
+    if let Some(m) = new_mode {
+        led.mode = m;
+    }
+    if let Some(c) = color {
+        led.color = c;
+    }
+    if let Some(b) = brightness {
+        led.brightness = b;
+    }
+    write_snapshot(&rb, &target, &format!("led set {p} {l}"), mode)
 }
 
 // ---------------------------------------------------------------------- check

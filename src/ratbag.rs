@@ -348,26 +348,31 @@ fn raw_value(v: &OwnedValue) -> Option<RawValue> {
 
 /// libratbag's button action types and special-action ids.
 pub fn describe_mapping(kind: u32, v: &OwnedValue) -> String {
-    match (kind, raw_value(v)) {
+    describe(kind, &raw_value(v))
+}
+
+pub fn describe(kind: u32, value: &Option<RawValue>) -> String {
+    match (kind, value) {
         (0, _) => "none".into(),
         (1, Some(RawValue::Number(n))) => format!("mouse button {n}"),
-        (2, Some(RawValue::Number(n))) => format!("special {}", special_name(n)),
-        (3, Some(RawValue::Number(n))) => format!("key {}", key_name(n)),
+        (2, Some(RawValue::Number(n))) => format!("special {}", special_name(*n)),
+        (3, Some(RawValue::Number(n))) => format!("key {}", key_name(*n)),
         (4, Some(RawValue::MacroEvents(ev))) => {
-            let steps: Vec<String> = ev
-                .iter()
-                .map(|[t, k]| match t {
-                    1 => format!("+{}", key_name(*k)),
-                    2 => format!("-{}", key_name(*k)),
-                    _ => format!("?{t}:{k}"),
-                })
-                .collect();
             // press+release of one key reads better as just the key
             if let [[1, a], [2, b]] = ev[..]
                 && a == b
             {
                 return format!("macro {}", key_name(a));
             }
+            let steps: Vec<String> = ev
+                .iter()
+                .map(|[t, k]| match t {
+                    1 => format!("+{}", key_name(*k)),
+                    2 => format!("-{}", key_name(*k)),
+                    3 => format!("wait {k}ms"),
+                    _ => format!("?{t}:{k}"),
+                })
+                .collect();
             format!("macro [{}]", steps.join(" "))
         }
         (t, _) => format!("unknown type {t}"),
@@ -381,17 +386,62 @@ fn key_name(code: u32) -> String {
     }
 }
 
+/// libratbag `ActionSpecial` names, in id order starting at 1<<30.
+const SPECIALS: [&str; 19] = [
+    "unknown", "doubleclick", "wheel-left", "wheel-right", "wheel-up", "wheel-down",
+    "ratchet-mode-switch", "resolution-cycle-up", "resolution-cycle-down", "resolution-up",
+    "resolution-down", "resolution-alternate", "resolution-default", "profile-cycle-up",
+    "profile-cycle-down", "profile-up", "profile-down", "second-mode", "battery-level",
+];
+
 fn special_name(id: u32) -> String {
-    const NAMES: [&str; 19] = [
-        "unknown", "doubleclick", "wheel-left", "wheel-right", "wheel-up", "wheel-down",
-        "ratchet-mode-switch", "resolution-cycle-up", "resolution-cycle-down", "resolution-up",
-        "resolution-down", "resolution-alternate", "resolution-default", "profile-cycle-up",
-        "profile-cycle-down", "profile-up", "profile-down", "second-mode", "battery-level",
-    ];
-    match id.checked_sub(1 << 30).and_then(|i| NAMES.get(i as usize)) {
+    match id.checked_sub(1 << 30).and_then(|i| SPECIALS.get(i as usize)) {
         Some(n) => (*n).into(),
         None => format!("#{id:#x}"),
     }
+}
+
+fn special_id(name: &str) -> Option<u32> {
+    let i = SPECIALS.iter().skip(1).position(|n| *n == name)? + 1;
+    Some((1 << 30) + i as u32)
+}
+
+/// "KEY_A", "key_a" or "a" -> evdev key code.
+fn key_code(name: &str) -> Result<u32> {
+    let up = name.to_uppercase();
+    let full = if up.starts_with("KEY_") { up } else { format!("KEY_{up}") };
+    let key: evdev::KeyCode = full.parse().map_err(|_| anyhow::anyhow!("unknown key {name:?} (use evdev names such as KEY_A, KEY_F13, KEY_LEFTCTRL)"))?;
+    Ok(u32::from(key.code()))
+}
+
+/// Parse a button action given on the command line into a raw ratbagd
+/// (type, value): `none`, `button N`, `special NAME`, `key KEY_X`, `macro KEY_X`.
+pub fn parse_action(words: &[&str]) -> Result<(u32, Option<RawValue>)> {
+    match words {
+        ["none"] => Ok((0, None)),
+        ["button", n] => {
+            let n: u32 = n.parse().map_err(|_| anyhow::anyhow!("not a button number: {n:?}"))?;
+            ensure!(n >= 1, "mouse buttons are numbered from 1");
+            Ok((1, Some(RawValue::Number(n))))
+        }
+        ["special", name] => {
+            let id = special_id(name).with_context(|| format!("unknown special action {name:?}; known: {}", SPECIALS[1..].join(", ")))?;
+            Ok((2, Some(RawValue::Number(id))))
+        }
+        ["key", k] => Ok((3, Some(RawValue::Number(key_code(k)?)))),
+        ["macro", k] => {
+            let c = key_code(k)?;
+            Ok((4, Some(RawValue::MacroEvents(vec![[1, c], [2, c]]))))
+        }
+        _ => bail!("action must be one of: none | button N | special NAME | key KEY_X | macro KEY_X"),
+    }
+}
+
+/// libratbag `Led.Mode` values (confirmed against ratbagctl's own enum).
+pub const LED_MODES: [&str; 4] = ["off", "on", "cycle", "breathing"];
+
+pub fn parse_led_mode(name: &str) -> Result<u32> {
+    LED_MODES.iter().position(|m| *m == name).map(|i| i as u32).with_context(|| format!("unknown LED mode {name:?}; use one of: {}", LED_MODES.join(", ")))
 }
 
 // ----------------------------------------------------------------- controller
@@ -465,5 +515,66 @@ impl DpiBackend for Controller {
             }
         }
         self.rb.commit()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_actions() {
+        assert_eq!(parse_action(&["none"]).unwrap(), (0, None));
+        assert_eq!(parse_action(&["button", "3"]).unwrap(), (1, Some(RawValue::Number(3))));
+        assert_eq!(parse_action(&["key", "KEY_A"]).unwrap(), (3, Some(RawValue::Number(30))));
+        assert_eq!(parse_action(&["key", "a"]).unwrap(), (3, Some(RawValue::Number(30))));
+        assert_eq!(
+            parse_action(&["macro", "KEY_F13"]).unwrap(),
+            (4, Some(RawValue::MacroEvents(vec![[1, 183], [2, 183]])))
+        );
+    }
+
+    #[test]
+    fn special_names_match_libratbag_ids() {
+        // ids from ratbagctl's ActionSpecial enum
+        assert_eq!(parse_action(&["special", "resolution-alternate"]).unwrap().1, Some(RawValue::Number((1 << 30) + 11)));
+        assert_eq!(parse_action(&["special", "profile-cycle-up"]).unwrap().1, Some(RawValue::Number((1 << 30) + 13)));
+        assert_eq!(parse_action(&["special", "wheel-left"]).unwrap().1, Some(RawValue::Number((1 << 30) + 2)));
+        for name in &SPECIALS[1..] {
+            let id = special_id(name).unwrap();
+            assert_eq!(special_name(id), *name);
+        }
+        assert!(special_id("unknown").is_none());
+    }
+
+    #[test]
+    fn rejects_bad_actions() {
+        assert!(parse_action(&[]).is_err());
+        assert!(parse_action(&["button", "0"]).is_err());
+        assert!(parse_action(&["button", "x"]).is_err());
+        assert!(parse_action(&["special", "nope"]).is_err());
+        assert!(parse_action(&["key", "KEY_NOPE_NOT_REAL"]).is_err());
+        assert!(parse_action(&["macro"]).is_err());
+        assert!(parse_action(&["none", "extra"]).is_err());
+    }
+
+    #[test]
+    fn led_modes() {
+        assert_eq!(parse_led_mode("off").unwrap(), 0);
+        assert_eq!(parse_led_mode("on").unwrap(), 1);
+        assert_eq!(parse_led_mode("cycle").unwrap(), 2);
+        assert_eq!(parse_led_mode("breathing").unwrap(), 3);
+        assert!(parse_led_mode("blink").is_err());
+    }
+
+    #[test]
+    fn describes_actions() {
+        assert_eq!(describe(1, &Some(RawValue::Number(9))), "mouse button 9");
+        assert_eq!(describe(4, &Some(RawValue::MacroEvents(vec![[1, 183], [2, 183]]))), "macro KEY_F13");
+        assert_eq!(
+            describe(4, &Some(RawValue::MacroEvents(vec![[1, 29], [1, 46], [3, 50], [2, 46], [2, 29]]))),
+            "macro [+KEY_LEFTCTRL +KEY_C wait 50ms -KEY_C -KEY_LEFTCTRL]"
+        );
+        assert_eq!(describe(2, &Some(RawValue::Number((1 << 30) + 13))), "special profile-cycle-up");
     }
 }
