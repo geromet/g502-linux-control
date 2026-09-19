@@ -99,7 +99,7 @@ impl Config {
         if v.is_empty() {
             bail!("dpi.values must not be empty");
         }
-        if v.iter().any(|&d| d == 0) || v.windows(2).any(|w| w[0] >= w[1]) {
+        if v.contains(&0) || v.windows(2).any(|w| w[0] >= w[1]) {
             bail!("dpi.values must be positive and strictly ascending, got {v:?}");
         }
         if self.dpi.profiles.is_empty() {

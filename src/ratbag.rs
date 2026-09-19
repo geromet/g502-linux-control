@@ -294,10 +294,10 @@ pub fn describe_mapping(kind: u32, v: &OwnedValue) -> String {
                 })
                 .collect();
             // press+release of one key reads better as just the key
-            if let [[1, a], [2, b]] = ev[..] {
-                if a == b {
-                    return format!("macro {}", key_name(a));
-                }
+            if let [[1, a], [2, b]] = ev[..]
+                && a == b
+            {
+                return format!("macro {}", key_name(a));
             }
             format!("macro [{}]", steps.join(" "))
         }

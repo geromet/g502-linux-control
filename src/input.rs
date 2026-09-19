@@ -71,10 +71,10 @@ pub fn run(vendor: u16, product: u16, tx: Sender<Step>) {
                 if ev.event_type() != EventType::KEY || ev.value() != 1 {
                     continue;
                 }
-                if let Some(step) = step_for(ev.code()) {
-                    if tx.send(step).is_err() {
-                        return;
-                    }
+                if let Some(step) = step_for(ev.code())
+                    && tx.send(step).is_err()
+                {
+                    return;
                 }
             }
         }
