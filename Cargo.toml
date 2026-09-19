@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 evdev = "0.13.2"
+libc = "0.2.189"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
 zbus = "5.19.0"

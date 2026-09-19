@@ -24,6 +24,11 @@ Config: $G502_CONFIG or ~/.config/g502-linux-control/config.toml
 ";
 
 fn main() {
+    // Rust ignores SIGPIPE by default, which turns `g502ctl check | head`
+    // into a panic. Restore the default so we just exit like other CLI tools.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args[..] {
