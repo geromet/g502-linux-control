@@ -1,0 +1,89 @@
+#!/usr/bin/python3
+
+import os
+import subprocess
+import time
+
+from evdev import InputDevice, list_devices, ecodes
+
+VID = 0x046d
+PID = 0xc08b
+
+DPI_TOOL = os.path.expanduser("~/.local/bin/g502-dpi")
+
+
+def find_g502_keyboard():
+    for path in list_devices():
+        try:
+            dev = InputDevice(path)
+
+            if dev.info.vendor != VID or dev.info.product != PID:
+                dev.close()
+                continue
+
+            keys = dev.capabilities().get(ecodes.EV_KEY, [])
+
+            if ecodes.KEY_F13 in keys and ecodes.KEY_F14 in keys:
+                return dev
+
+            dev.close()
+
+        except (PermissionError, OSError):
+            continue
+
+    return None
+
+
+while True:
+    dev = find_g502_keyboard()
+
+    if dev is None:
+        print(
+            "G502 HERO keyboard endpoint not found/readable; retrying...",
+            flush=True,
+        )
+        time.sleep(2)
+        continue
+
+    try:
+        # Prevent F13/F14 from reaching Wayland/KDE/applications.
+        dev.grab()
+
+        print(
+            f"Listening on {dev.path}: {dev.name}",
+            flush=True,
+        )
+
+        for event in dev.read_loop():
+            if event.type != ecodes.EV_KEY:
+                continue
+
+            # Only react to the initial key-down.
+            # Ignore release (0) and autorepeat (2).
+            if event.value != 1:
+                continue
+
+            if event.code == ecodes.KEY_F13:
+                direction = "down"
+            elif event.code == ecodes.KEY_F14:
+                direction = "up"
+            else:
+                continue
+
+            subprocess.run(
+                [DPI_TOOL, direction],
+                stdout=subprocess.DEVNULL,
+                check=False,
+            )
+
+    except (OSError, PermissionError) as exc:
+        print(f"G502 input disconnected/unavailable: {exc}", flush=True)
+
+    finally:
+        try:
+            dev.ungrab()
+        except OSError:
+            pass
+
+        dev.close()
+        time.sleep(1)

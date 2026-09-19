@@ -1,0 +1,4 @@
+# Let the logged-in seat user open this one mouse's input nodes (needed to
+# grab the F13/F14 endpoint) without adding anyone to the broad `input` group.
+# Not needed if another rule already tags the device uaccess (e.g. openrgb's 60-openrgb.rules).
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c08b", TAG+="uaccess"

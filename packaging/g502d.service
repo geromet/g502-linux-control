@@ -1,0 +1,13 @@
+[Unit]
+Description=G502 HERO shared-DPI daemon (g502-linux-control)
+After=graphical-session.target
+# Only one process may grab the mouse's evdev endpoint.
+Conflicts=g502-dpid.service
+
+[Service]
+ExecStart=%h/.cargo/bin/g502d
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,18 @@
+# ~/.config/g502-linux-control/config.toml
+# Every key is optional; these are the built-in defaults (the tested setup).
+
+[device]
+vendor = 0x046d
+product = 0xc08b
+
+[dpi]
+values = [1000, 1800, 2400, 3200, 4000]  # ascending stages
+shared_slot = 1      # resolution slot holding the shared DPI
+profiles = [0, 1]    # profiles kept in sync
+
+# Only compared against the device by `g502ctl check` (nothing is written).
+[profiles.0]
+color = "0000ff"
+
+[profiles.1]
+color = "ff0000"

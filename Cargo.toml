@@ -1,0 +1,19 @@
+[package]
+name = "g502-linux-control"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+evdev = "0.13.2"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+zbus = "5.19.0"
+
+[[bin]]
+name = "g502d"
+path = "src/bin/g502d.rs"
+
+[[bin]]
+name = "g502ctl"
+path = "src/bin/g502ctl.rs"

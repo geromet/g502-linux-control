@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEV=warbling-mara
+STATE="$HOME/.local/state/g502-dpi"
+LOCK="$HOME/.local/state/g502-dpi.lock"
+DPIS=(1000 1800 2400 3200 4000)
+
+mkdir -p "${STATE%/*}"
+
+# Serialize rapid presses so none get lost.
+exec 9>"$LOCK"
+flock 9
+
+current=1
+[[ -f "$STATE" ]] && read -r current < "$STATE"
+
+case "${1:-}" in
+    up)
+        (( current < ${#DPIS[@]} - 1 )) && current=$((current + 1))
+        ;;
+    down)
+        (( current > 0 )) && current=$((current - 1))
+        ;;
+    *)
+        exit 2
+        ;;
+esac
+
+dpi="${DPIS[$current]}"
+
+# Stage profile 0 without committing to hardware yet.
+ratbagctl --nocommit "$DEV" profile 0 resolution 1 dpi set "$dpi"
+
+# This final command commits BOTH changes in one write.
+ratbagctl "$DEV" profile 1 resolution 1 dpi set "$dpi"
+
+printf '%s\n' "$current" > "$STATE"
+
