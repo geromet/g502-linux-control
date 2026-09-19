@@ -6,7 +6,9 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 evdev = "0.13.2"
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "wayland", "x11", "thread-pool"], optional = true }
 libc = "0.2.189"
+png = { version = "0.18.1", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
 zbus = "5.19.0"
@@ -18,3 +20,12 @@ path = "src/bin/g502d.rs"
 [[bin]]
 name = "g502ctl"
 path = "src/bin/g502ctl.rs"
+
+[[bin]]
+name = "g502-gui"
+path = "src/bin/g502-gui.rs"
+required-features = ["gui"]
+
+[features]
+# The GUI is optional so g502d/g502ctl stay small: cargo install --path . --features gui
+gui = ["dep:iced", "dep:png"]

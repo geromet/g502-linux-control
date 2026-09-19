@@ -72,6 +72,28 @@ journalctl --user -u g502d -f
 Config is optional: `~/.config/g502-linux-control/config.toml` (or `$G502_CONFIG`);
 see [`packaging/config.example.toml`](packaging/config.example.toml). Missing file = the tested defaults.
 
+### GUI (optional, read-only for now)
+
+```sh
+cargo install --path . --features gui     # adds g502-gui next to g502d and g502ctl
+g502-gui
+```
+
+A native Wayland window (iced, software renderer, no Electron/Node) that shows what
+`g502ctl check` reports: profile tabs, the shared DPI and its stages, every button with
+its action, resolution slots, report rate and LED colours. It marks each action as
+*onboard* (stored in the mouse) and flags the F13/F14 macros that `g502d` reads, because
+those two kinds of action behave differently. It also says whether the device matches
+your config. It never writes to the mouse; use `g502ctl` for changes. The GUI is behind
+a cargo feature so a plain `cargo install --path .` (daemon and CLI) stays small.
+
+Not in the GUI yet: any editing, and an "active profile" indicator (ratbagd's value for
+it is unreliable on this mouse, see below). Button labels are `Button N` because the
+mapping from index to physical button has not been verified on the hardware.
+
+For development, `G502_GUI_SCREENSHOT=out.png [G502_GUI_PROFILE=1] g502-gui` saves a
+picture of the window's own contents once loaded and exits.
+
 ### Permissions
 
 `/dev/input/event*` is `root:input 0660` on Fedora, and there is no reason to put
@@ -118,15 +140,19 @@ enabled, and that every configured stage is a DPI the hardware accepts.
 
 ## Architecture
 
-One crate, two binaries, no async runtime.
+One crate, no async runtime in the daemon or CLI. Binaries: `g502d`, `g502ctl` and the
+optional `g502-gui`.
 
 ```
 src/dpi.rs      pure stepping logic + DpiBackend trait + burst batching   (unit-tested)
 src/config.rs   TOML config, defaults, validation                         (unit-tested)
+src/restore.rs  plan/diff between two snapshots + staging                 (plan is pure, unit-tested)
+src/apply.rs    config <-> snapshot overlay and export                    (pure, unit-tested)
 src/ratbag.rs   blocking zbus client for org.freedesktop.ratbag1, snapshot, Controller
 src/input.rs    find/grab the F13/F14 evdev endpoint, reconnect on unplug
 src/bin/g502d.rs    input thread --channel--> loop: batch -> lock -> read DPI -> write
-src/bin/g502ctl.rs  status / dpi / check / backup
+src/bin/g502ctl.rs  status / dpi / check / backup / restore / apply / button / led / profile
+src/bin/g502-gui.rs read-only iced GUI (cargo feature "gui")
 ```
 
 - **The mouse is the state.** Every update reads the current DPI from ratbagd, steps it,
@@ -227,7 +253,7 @@ they consume something it re-emits; never two grabbers on the same node.
 - A commit takes roughly 270 ms on the tested mouse (measured via `g502ctl dpi set`),
   so the pointer speed changes that long after a press. Presses during a commit are
   coalesced into the next one, not lost.
-- No GUI yet. Host-side actions (key combos, commands, multi-step macros) are not implemented;
+- The GUI is read-only. Host-side actions (key combos, commands, multi-step macros) are not implemented;
   multi-event macros stored in the mouse show up in `config export` as comments.
 - LED brightness is unreliable on the tested mouse: ratbagd reported 255 at first, then 0 for every
   LED after commits, while the LEDs kept their colour. `led set --brightness` writes and reads
