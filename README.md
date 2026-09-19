@@ -163,8 +163,10 @@ they consume something it re-emits; never two grabbers on the same node.
   so the pointer speed changes that long after a press. Presses during a commit are
   coalesced into the next one, not lost.
 - No GUI yet; no button/LED writing yet; `[profiles.N].color` is only compared by `check`.
-- The daemon's grab/burst path is covered by unit tests, but the real F13/F14 press path
-  has to be exercised with the physical mouse.
+- Verified by hand on the tested mouse (2026-09-19): single presses, boundaries, bursts
+  (29 presses folded into one commit), unplug/replug reconnect, pointer speed, and no
+  F13/F14 leaking to the desktop while the grab is held. Not automated: the real
+  press path has no CI test.
 
 ## Development
 
