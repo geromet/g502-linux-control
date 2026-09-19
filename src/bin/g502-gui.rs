@@ -9,13 +9,14 @@
 //! itself (only its own contents) once it has loaded, and exit. Used to check
 //! the rendering without a display server session to look at. In that mode
 //! G502_GUI_PROFILE=N picks the profile tab, G502_GUI_EDIT=P:B:KIND:VALUE opens
-//! the button editor (KIND: none|button|special|key|macro), G502_GUI_APPLY=1
+//! an editor (`P:B:KIND:VALUE` with KIND none|button|special|key|macro,
+//! `led:P:L:MODE:COLOR:BRIGHTNESS` or `rate:P:HZ`), G502_GUI_APPLY=1
 //! presses Apply once loaded, and the window is tall enough to show everything.
 
 use g502_linux_control::{
-    apply::{overlay, with_button},
-    config::Config,
-    ratbag::{ProfileInfo, Ratbag, RawValue, Snapshot, led_mode_name, special_names},
+    apply::{overlay, with_button, with_led, with_report_rate},
+    config::{Config, parse_color},
+    ratbag::{LED_MODES, ProfileInfo, Ratbag, RawValue, Snapshot, led_mode_name, parse_led_mode, special_names},
     restore::{plan, write},
 };
 use iced::{
@@ -57,7 +58,7 @@ struct App {
     load: Load,
     selected: usize,
     screenshot: Option<PathBuf>,
-    editor: Option<Editor>,
+    editor: Option<Edit>,
     notice: Option<(bool, String)>,
     busy: bool,
     auto_apply: bool,
@@ -112,14 +113,15 @@ impl Kind {
     }
 }
 
-struct Editor {
+#[derive(Clone)]
+struct ButtonEdit {
     profile: u32,
     button: u32,
     kind: Kind,
     value: String,
 }
 
-impl Editor {
+impl ButtonEdit {
     /// The words `parse_action` understands.
     fn words(&self) -> Vec<&str> {
         match self.kind {
@@ -130,13 +132,67 @@ impl Editor {
 }
 
 #[derive(Clone)]
+struct LedEdit {
+    profile: u32,
+    led: u32,
+    mode: u32,
+    color: String,
+    brightness: String,
+}
+
+/// What is being edited. Each variant knows how to build the snapshot the
+/// device should end up with; the preview and the write both start from that.
+#[derive(Clone)]
+enum Edit {
+    Button(ButtonEdit),
+    Led(LedEdit),
+    Rate { profile: u32, hz: u32 },
+}
+
+impl Edit {
+    fn profile(&self) -> u32 {
+        match self {
+            Edit::Button(e) => e.profile,
+            Edit::Led(e) => e.profile,
+            Edit::Rate { profile, .. } => *profile,
+        }
+    }
+
+    fn title(&self) -> String {
+        match self {
+            Edit::Button(e) => format!("profile {} button {}", e.profile, e.button),
+            Edit::Led(e) => format!("profile {} LED {}", e.profile, e.led),
+            Edit::Rate { profile, .. } => format!("profile {profile} report rate"),
+        }
+    }
+
+    fn target(&self, snap: &Snapshot) -> anyhow::Result<Snapshot> {
+        match self {
+            Edit::Button(e) => with_button(snap, e.profile, e.button, &e.words()),
+            Edit::Led(e) => {
+                let b = e.brightness.trim();
+                let brightness: u32 = b.parse().map_err(|_| anyhow::anyhow!("brightness must be a number from 0 to 255, got {b:?}"))?;
+                with_led(snap, e.profile, e.led, Some(e.mode), Some(&e.color), Some(brightness))
+            }
+            Edit::Rate { profile, hz } => with_report_rate(snap, *profile, *hz),
+        }
+    }
+}
+
+#[derive(Clone)]
 enum Message {
     Refresh,
     Loaded(Result<Arc<Data>, String>),
     Select(usize),
     Edit(u32, u32),
+    EditLed(u32, u32),
+    EditRate(u32),
     EditKind(Kind),
     EditValue(String),
+    LedMode(u32),
+    LedColor(String),
+    LedBrightness(String),
+    RateHz(u32),
     CancelEdit,
     ApplyEdit,
     Applied(Result<String, String>),
@@ -169,15 +225,10 @@ impl App {
     fn boot() -> (App, Task<Message>) {
         let screenshot = std::env::var_os("G502_GUI_SCREENSHOT").map(PathBuf::from);
         let selected = std::env::var("G502_GUI_PROFILE").ok().and_then(|p| p.parse().ok()).unwrap_or(0);
-        // Dev hook: G502_GUI_EDIT=profile:button:kind:value
-        let editor = std::env::var("G502_GUI_EDIT").ok().and_then(|v| {
-            let mut it = v.splitn(4, ':');
-            let (profile, button) = (it.next()?.parse().ok()?, it.next()?.parse().ok()?);
-            let kind = Kind::from_word(it.next()?)?;
-            Some(Editor { profile, button, kind, value: it.next().unwrap_or("").to_string() })
-        });
+        // Dev hook: G502_GUI_EDIT=P:B:KIND:VALUE | led:P:L:MODE:COLOR:BRIGHTNESS | rate:P:HZ
+        let editor = std::env::var("G502_GUI_EDIT").ok().and_then(|v| parse_edit_hook(&v));
         let auto_apply = screenshot.is_some() && std::env::var_os("G502_GUI_APPLY").is_some();
-        let selected = editor.as_ref().map_or(selected, |e| e.profile as usize);
+        let selected = editor.as_ref().map_or(selected, |e| e.profile() as usize);
         (
             App { load: Load::Loading, selected, screenshot, editor, notice: None, busy: false, auto_apply },
             Task::perform(async { read_device() }, Message::Loaded),
@@ -209,20 +260,62 @@ impl App {
                 if let Load::Ready(d) = &self.load
                     && let Some(b) = d.snap.profiles.get(profile as usize).and_then(|p| p.buttons.get(button as usize))
                 {
-                    self.editor = Some(editor_for(profile, b.raw_type, &b.raw_value, button));
+                    self.editor = Some(Edit::Button(editor_for(profile, b.raw_type, &b.raw_value, button)));
+                }
+                Task::none()
+            }
+            Message::EditLed(profile, led) => {
+                self.notice = None;
+                if let Load::Ready(d) = &self.load
+                    && let Some(l) = d.snap.profiles.get(profile as usize).and_then(|p| p.leds.get(led as usize))
+                {
+                    self.editor = Some(Edit::Led(LedEdit { profile, led, mode: l.mode, color: l.color.clone(), brightness: l.brightness.to_string() }));
+                }
+                Task::none()
+            }
+            Message::EditRate(profile) => {
+                self.notice = None;
+                if let Load::Ready(d) = &self.load
+                    && let Some(p) = d.snap.profiles.get(profile as usize)
+                {
+                    self.editor = Some(Edit::Rate { profile, hz: p.report_rate });
                 }
                 Task::none()
             }
             Message::EditKind(kind) => {
-                if let Some(e) = &mut self.editor {
+                if let Some(Edit::Button(e)) = &mut self.editor {
                     e.kind = kind;
                     e.value = kind.default_value().to_string();
                 }
                 Task::none()
             }
             Message::EditValue(v) => {
-                if let Some(e) = &mut self.editor {
+                if let Some(Edit::Button(e)) = &mut self.editor {
                     e.value = v;
+                }
+                Task::none()
+            }
+            Message::LedMode(m) => {
+                if let Some(Edit::Led(e)) = &mut self.editor {
+                    e.mode = m;
+                }
+                Task::none()
+            }
+            Message::LedColor(c) => {
+                if let Some(Edit::Led(e)) = &mut self.editor {
+                    e.color = c;
+                }
+                Task::none()
+            }
+            Message::LedBrightness(b) => {
+                if let Some(Edit::Led(e)) = &mut self.editor {
+                    e.brightness = b;
+                }
+                Task::none()
+            }
+            Message::RateHz(hz) => {
+                if let Some(Edit::Rate { hz: cur, .. }) = &mut self.editor {
+                    *cur = hz;
                 }
                 Task::none()
             }
@@ -231,11 +324,9 @@ impl App {
                 Task::none()
             }
             Message::ApplyEdit => {
-                let Some(e) = &self.editor else { return Task::none() };
+                let Some(edit) = self.editor.clone() else { return Task::none() };
                 self.busy = true;
-                let (profile, button) = (e.profile, e.button);
-                let words: Vec<String> = e.words().into_iter().map(str::to_string).collect();
-                Task::perform(async move { write_button(profile, button, &words) }, Message::Applied)
+                Task::perform(async move { write_edit(&edit) }, Message::Applied)
             }
             Message::Applied(result) => {
                 self.busy = false;
@@ -351,49 +442,84 @@ impl App {
         )
     }
 
-    fn editor_panel<'a>(&'a self, d: &'a Data, e: &'a Editor, synced: bool) -> Element<'a, Message> {
-        let value: Element<Message> = match e.kind {
-            Kind::None => text("The button will do nothing.").size(14).style(muted).into(),
-            Kind::Special => pick_list(
-                special_names(),
-                special_names().iter().copied().find(|n| *n == e.value),
-                |n| Message::EditValue(n.to_string()),
-            )
-            .width(260)
-            .into(),
-            Kind::MouseButton => text_input("button number, e.g. 3", &e.value).on_input(Message::EditValue).width(260).into(),
-            Kind::Key | Kind::Macro => text_input("evdev key name, e.g. KEY_A", &e.value).on_input(Message::EditValue).width(260).into(),
+    fn editor_panel<'a>(&'a self, d: &'a Data, edit: &'a Edit, synced: bool) -> Element<'a, Message> {
+        let controls: Element<Message> = match edit {
+            Edit::Button(e) => {
+                let value: Element<Message> = match e.kind {
+                    Kind::None => text("The button will do nothing.").size(14).style(muted).into(),
+                    Kind::Special => pick_list(
+                        special_names(),
+                        special_names().iter().copied().find(|n| *n == e.value),
+                        |n| Message::EditValue(n.to_string()),
+                    )
+                    .width(260)
+                    .into(),
+                    Kind::MouseButton => text_input("button number, e.g. 3", &e.value).on_input(Message::EditValue).width(260).into(),
+                    Kind::Key | Kind::Macro => text_input("evdev key name, e.g. KEY_A", &e.value).on_input(Message::EditValue).width(260).into(),
+                };
+                row![pick_list(KINDS, Some(e.kind), Message::EditKind).width(230), value].spacing(10).align_y(iced::Center).into()
+            }
+            Edit::Led(e) => {
+                let swatch: Element<Message> = match parse_color(&e.color) {
+                    Ok((r, g, b)) => container(Space::new())
+                        .width(26)
+                        .height(26)
+                        .style(move |_: &Theme| container::Style {
+                            background: Some(Background::Color(Color::from_rgb8(r, g, b))),
+                            border: Border { radius: 5.0.into(), width: 1.0, color: Color::from_rgba(1.0, 1.0, 1.0, 0.35) },
+                            ..Default::default()
+                        })
+                        .into(),
+                    Err(_) => Space::new().width(26).into(),
+                };
+                row![
+                    text("Mode").size(14),
+                    pick_list(LED_MODES, led_mode_name(e.mode), |n: &'static str| Message::LedMode(parse_led_mode(n).unwrap_or(1))).width(150),
+                    text("Color").size(14),
+                    text_input("RRGGBB", &e.color).on_input(Message::LedColor).width(110),
+                    swatch,
+                    text("Brightness").size(14),
+                    text_input("0-255", &e.brightness).on_input(Message::LedBrightness).width(80),
+                ]
+                .spacing(10)
+                .align_y(iced::Center)
+                .into()
+            }
+            Edit::Rate { profile, hz } => {
+                let rates: &[u32] = d.snap.profiles.get(*profile as usize).map_or(&[], |p| &p.report_rates);
+                row![text("Report rate").size(14), pick_list(rates, Some(*hz), Message::RateHz).width(120), text("Hz").size(14)]
+                    .spacing(10)
+                    .align_y(iced::Center)
+                    .into()
+            }
         };
 
         // Exactly what would change, computed by the same code that writes it.
-        let preview = with_button(&d.snap, e.profile, e.button, &e.words()).and_then(|t| plan(&d.snap, &t));
+        let preview = edit.target(&d.snap).and_then(|t| plan(&d.snap, &t));
         let (lines, valid): (Element<Message>, bool) = match &preview {
-            Ok(p) if p.is_empty() => (text("No change: the button already has this action.").size(14).style(muted).into(), false),
+            Ok(p) if p.is_empty() => (text("No change: the device already has this.").size(14).style(muted).into(), false),
             Ok(p) => (column(p.iter().map(|c| text(c.summary.clone()).size(14).into())).spacing(4).into(), true),
             Err(err) => (text(format!("{err:#}")).size(14).style(text::danger).into(), false),
         };
 
         let touches_daemon = synced
-            && d.snap
+            && matches!(edit, Edit::Button(e) if d.snap
                 .profiles
                 .get(e.profile as usize)
                 .and_then(|p| p.buttons.get(e.button as usize))
-                .is_some_and(|b| daemon_role(b.raw_type, &b.raw_value).is_some());
+                .is_some_and(|b| daemon_role(b.raw_type, &b.raw_value).is_some()));
         let warning: Element<Message> = if touches_daemon {
             text("This button sends KEY_F13/KEY_F14 to g502d. Changing it turns off that DPI button.").size(13).style(text::danger).into()
+        } else if matches!(edit, Edit::Led(_)) {
+            text("LED brightness is unreliable on the G502 HERO: ratbagd may report a value the LED does not follow.").size(12).style(muted).into()
         } else {
             Space::new().into()
         };
 
         panel(
-            &format!("Edit profile {} button {}", e.profile, e.button),
+            &format!("Edit {}", edit.title()),
             column![
-                row![
-                    pick_list(KINDS, Some(e.kind), Message::EditKind).width(230),
-                    value,
-                ]
-                .spacing(10)
-                .align_y(iced::Center),
+                controls,
                 lines,
                 warning,
                 row![
@@ -434,7 +560,7 @@ impl App {
                 Some(role) => text(format!("onboard macro, read by g502d: {role}")).size(13).style(accent).into(),
                 None => text("onboard (stored in the mouse)").size(13).style(muted).into(),
             };
-            let editing_this = self.editor.as_ref().is_some_and(|e| e.profile == p.index && e.button == b.index);
+            let editing_this = matches!(&self.editor, Some(Edit::Button(e)) if e.profile == p.index && e.button == b.index);
             let edit = button(text("Edit").size(13))
                 .on_press_maybe((!self.busy && !editing_this).then_some(Message::Edit(p.index, b.index)))
                 .style(button::secondary);
@@ -448,7 +574,7 @@ impl App {
                 .align_y(iced::Center),
             );
         }
-        let editor: Option<Element<Message>> = self.editor.as_ref().filter(|e| e.profile == p.index).map(|e| self.editor_panel(d, e, synced));
+        let editor: Option<Element<Message>> = self.editor.as_ref().filter(|e| e.profile() == p.index).map(|e| self.editor_panel(d, e, synced));
         let buttons = column![
             buttons,
             text("Host-side actions (key combos, commands, macros run by a daemon) are not implemented yet.").size(12).style(muted),
@@ -484,7 +610,10 @@ impl App {
                         border: Border { radius: 5.0.into(), width: 1.0, color: Color::from_rgba(1.0, 1.0, 1.0, 0.35) },
                         ..Default::default()
                     }),
-                text(format!("LED {}: {mode}, #{}", l.index, l.color)).size(14),
+                text(format!("LED {}: {mode}, #{}", l.index, l.color)).size(14).width(Length::Fill),
+                button(text("Edit").size(13))
+                    .on_press_maybe((!self.busy && !matches!(&self.editor, Some(Edit::Led(e)) if e.profile == p.index && e.led == l.index)).then_some(Message::EditLed(p.index, l.index)))
+                    .style(button::secondary),
             ]
             .spacing(10)
             .align_y(iced::Center)
@@ -497,7 +626,18 @@ impl App {
             editor.unwrap_or_else(|| Space::new().into()),
             panel(
                 "Resolution slots",
-                column![res, text(format!("Report rate: {} Hz (supports {:?})", p.report_rate, p.report_rates)).size(14)].spacing(8).into(),
+                column![
+                    res,
+                    row![
+                        text(format!("Report rate: {} Hz (supports {:?})", p.report_rate, p.report_rates)).size(14).width(Length::Fill),
+                        button(text("Edit").size(13))
+                            .on_press_maybe((!self.busy && !matches!(&self.editor, Some(Edit::Rate { profile, .. }) if *profile == p.index)).then_some(Message::EditRate(p.index)))
+                            .style(button::secondary),
+                    ]
+                    .align_y(iced::Center),
+                ]
+                .spacing(8)
+                .into(),
             ),
             panel("LEDs", leds.into()),
         ]
@@ -506,35 +646,54 @@ impl App {
     }
 }
 
-fn editor_for(profile: u32, kind: u32, value: &Option<RawValue>, button: u32) -> Editor {
+fn editor_for(profile: u32, kind: u32, value: &Option<RawValue>, button: u32) -> ButtonEdit {
     use g502_linux_control::ratbag::action_string;
     // Start from the current action when it has a config spelling.
     let current = action_string(kind, value);
     let words: Vec<&str> = current.as_deref().map(|s| s.split_whitespace().collect()).unwrap_or_default();
     match words[..] {
         [k, v] => match Kind::from_word(k) {
-            Some(kind) => Editor { profile, button, kind, value: v.to_string() },
-            None => Editor { profile, button, kind: Kind::MouseButton, value: "1".into() },
+            Some(kind) => ButtonEdit { profile, button, kind, value: v.to_string() },
+            None => ButtonEdit { profile, button, kind: Kind::MouseButton, value: "1".into() },
         },
-        ["none"] => Editor { profile, button, kind: Kind::None, value: String::new() },
-        _ => Editor { profile, button, kind: Kind::MouseButton, value: "1".into() },
+        ["none"] => ButtonEdit { profile, button, kind: Kind::None, value: String::new() },
+        _ => ButtonEdit { profile, button, kind: Kind::MouseButton, value: "1".into() },
     }
 }
 
-/// The GUI's only write: one button action, through the shared write path.
-fn write_button(profile: u32, button: u32, words: &[String]) -> Result<String, String> {
+/// The GUI's only write: one edit, through the shared write path.
+fn write_edit(edit: &Edit) -> Result<String, String> {
     let run = || -> anyhow::Result<String> {
         let (cfg, _) = Config::load()?;
         let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
-        let words: Vec<&str> = words.iter().map(String::as_str).collect();
-        let target = with_button(&rb.snapshot()?, profile, button, &words)?;
+        let target = edit.target(&rb.snapshot()?)?;
         let done = write(&rb, &target)?;
         Ok(match done.backup {
-            Some(b) => format!("Wrote {} change(s) to profile {profile} button {button}. Previous state saved to {}", done.written, b.display()),
-            None => "Nothing to change: the device already has that action.".to_string(),
+            Some(b) => format!("Wrote {} change(s) to {}. Previous state saved to {}", done.written, edit.title(), b.display()),
+            None => "Nothing to change: the device already has that.".to_string(),
         })
     };
     run().map_err(|e| format!("{e:#}"))
+}
+
+/// Dev hook syntax: `P:B:KIND:VALUE`, `led:P:L:MODE:COLOR:BRIGHTNESS`, `rate:P:HZ`.
+fn parse_edit_hook(v: &str) -> Option<Edit> {
+    let parts: Vec<&str> = v.splitn(6, ':').collect();
+    match parts[..] {
+        ["led", p, l, mode, color, brightness] => Some(Edit::Led(LedEdit {
+            profile: p.parse().ok()?,
+            led: l.parse().ok()?,
+            mode: parse_led_mode(mode).ok()?,
+            color: color.to_string(),
+            brightness: brightness.to_string(),
+        })),
+        ["rate", p, hz] => Some(Edit::Rate { profile: p.parse().ok()?, hz: hz.parse().ok()? }),
+        [p, b, kind, ..] => {
+            let value = v.splitn(4, ':').nth(3).unwrap_or("").to_string();
+            Some(Edit::Button(ButtonEdit { profile: p.parse().ok()?, button: b.parse().ok()?, kind: Kind::from_word(kind)?, value }))
+        }
+        _ => None,
+    }
 }
 
 /// What g502d does with an onboard macro, if it is one of its two keys.

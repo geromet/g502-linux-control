@@ -85,6 +85,38 @@ pub fn with_button(current: &Snapshot, profile: u32, button: u32, action: &[&str
     Ok(t)
 }
 
+/// `current` with one LED changed. Only the given fields change; colour is
+/// `RRGGBB` (a leading `#` is fine), brightness 0-255.
+pub fn with_led(current: &Snapshot, profile: u32, led: u32, mode: Option<u32>, color: Option<&str>, brightness: Option<u32>) -> Result<Snapshot> {
+    let mut t = current.clone();
+    let l = t
+        .profiles
+        .get_mut(profile as usize)
+        .and_then(|p| p.leds.get_mut(led as usize))
+        .with_context(|| format!("device has no profile {profile} LED {led}"))?;
+    if let Some(m) = mode {
+        l.mode = m;
+    }
+    if let Some(c) = color {
+        l.color = normalized(c)?;
+    }
+    if let Some(b) = brightness {
+        if b > 255 {
+            bail!("brightness must be 0-255, got {b}");
+        }
+        l.brightness = b;
+    }
+    Ok(t)
+}
+
+/// `current` with one profile's report rate changed. Unsupported rates are
+/// caught by `restore::plan`.
+pub fn with_report_rate(current: &Snapshot, profile: u32, hz: u32) -> Result<Snapshot> {
+    let mut t = current.clone();
+    t.profiles.get_mut(profile as usize).with_context(|| format!("device has no profile {profile}"))?.report_rate = hz;
+    Ok(t)
+}
+
 /// A complete config for the device as it is now. Applying it again is an empty
 /// diff. The daemon-managed shared DPI slot is left out (that is `[dpi]`'s job),
 /// and disabled profiles only record that they are disabled. Things that have no
@@ -228,6 +260,31 @@ mod tests {
         assert!(with_button(&dev, 1, 99, &["none"]).is_err());
         assert!(with_button(&dev, 9, 0, &["none"]).is_err());
         assert!(with_button(&dev, 0, 0, &["special", "nope"]).is_err());
+    }
+
+    #[test]
+    fn with_led_changes_only_what_is_given() {
+        let dev = device();
+        let t = with_led(&dev, 0, 1, Some(3), Some("#00FF00"), None).unwrap();
+        let p = plan(&dev, &t).unwrap();
+        assert_eq!(p.len(), 1);
+        assert!(p[0].summary.contains("LED 1: mode 1 -> 3, color 0000ff -> 00ff00"), "{}", p[0].summary);
+        assert!(!p[0].summary.contains("brightness"));
+        assert!(plan(&dev, &with_led(&dev, 0, 0, None, None, None).unwrap()).unwrap().is_empty());
+        assert!(with_led(&dev, 0, 0, None, Some("red"), None).is_err());
+        assert!(with_led(&dev, 0, 0, None, None, Some(256)).is_err());
+        assert!(with_led(&dev, 0, 9, None, None, None).is_err());
+        // an unsupported mode is caught by the plan
+        assert!(plan(&dev, &with_led(&dev, 0, 0, Some(9), None, None).unwrap()).is_err());
+    }
+
+    #[test]
+    fn with_report_rate_is_validated_by_the_plan() {
+        let dev = device();
+        let ok = plan(&dev, &with_report_rate(&dev, 0, 500).unwrap()).unwrap();
+        assert_eq!(ok.len(), 1);
+        assert!(plan(&dev, &with_report_rate(&dev, 0, 333).unwrap()).is_err());
+        assert!(with_report_rate(&dev, 9, 500).is_err());
     }
 
     #[test]

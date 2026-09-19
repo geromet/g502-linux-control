@@ -3,7 +3,7 @@
 
 use anyhow::{Result, bail};
 use g502_linux_control::{
-    config::{Config, parse_color},
+    config::Config,
     dpi::{DpiBackend, Step, apply_batch},
     input,
     ratbag::{Controller, Ratbag, RawValue, Snapshot, describe, lock_writes, parse_action, parse_led_mode},
@@ -328,7 +328,7 @@ fn led_set(profile: &str, led: &str, opts: &[&str], mode: Mode) -> Result<()> {
         let val = *it.next().ok_or_else(|| anyhow::anyhow!("{flag} needs a value"))?;
         match flag {
             "--mode" => new_mode = Some(parse_led_mode(val)?),
-            "--color" => color = Some(parse_color(val).map(|(r, g, b)| format!("{r:02x}{g:02x}{b:02x}"))?),
+            "--color" => color = Some(val.to_string()),
             "--brightness" => {
                 let n: u32 = val.parse().ok().filter(|n| *n <= 255).ok_or_else(|| anyhow::anyhow!("brightness must be 0-255, got {val:?}"))?;
                 brightness = Some(n);
@@ -338,21 +338,7 @@ fn led_set(profile: &str, led: &str, opts: &[&str], mode: Mode) -> Result<()> {
     }
     let cfg = load_config()?;
     let rb = Ratbag::open(cfg.device.vendor, cfg.device.product)?;
-    let mut target = rb.snapshot()?;
-    let led = target
-        .profiles
-        .get_mut(p as usize)
-        .and_then(|pr| pr.leds.get_mut(l as usize))
-        .ok_or_else(|| anyhow::anyhow!("device has no profile {p} LED {l}"))?;
-    if let Some(m) = new_mode {
-        led.mode = m;
-    }
-    if let Some(c) = color {
-        led.color = c;
-    }
-    if let Some(b) = brightness {
-        led.brightness = b;
-    }
+    let target = apply_mod::with_led(&rb.snapshot()?, p, l, new_mode, color.as_deref(), brightness)?;
     write_snapshot(&rb, &target, &format!("led set {p} {l}"), mode)
 }
 
